@@ -254,7 +254,11 @@ func decideTimer(s state, e timerFired) (state, []command) {
 		return s, nil
 	}
 	if e.id == s.estTimer {
-		if s.kind != stateRunning {
+		if s.kind != stateRunning || s.killSent {
+			// Stale: the child is gone or condemned. Drop the timer
+			// instead of clearing backoff/rapidFailures or emitting a
+			// reconnected report for a session we just killed.
+			s.estTimer = 0
 			return s, nil
 		}
 		s.estTimer = 0

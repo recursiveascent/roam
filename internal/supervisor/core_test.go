@@ -416,6 +416,35 @@ func TestPathDownInBackoffWaits(t *testing.T) {
 	}
 }
 
+func TestEstablishTimerFiresAfterKillIsDropped(t *testing.T) {
+	// A reconnect spawns with an establish timer. Before that timer
+	// fires, a path change condemns the child. The stale establish
+	// timer must not clear backoff/rapidFailures or report reconnected
+	// for a session we just killed.
+	s := running(t, "en0/1")
+	s, _ = decide(s, timerFired{id: s.estTimer}) // established
+	s, _ = decide(s, childExited{code: 255})    // respawn; backoffDelay=1s
+	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: "en1/1"})
+	est := s.estTimer
+	s, _ = decide(s, timerFired{id: s.pendTimer}) // kill dispatched
+	if !s.killSent {
+		t.Fatalf("killSent = false, want true")
+	}
+	if s.backoffDelay != time.Second {
+		t.Fatalf("before stray timer: backoffDelay = %v, want 1s", s.backoffDelay)
+	}
+	s, cmds := decide(s, timerFired{id: est})
+	if containsCommand(cmds, report{statusReconnected}) {
+		t.Fatalf("stale establish timer emitted reconnected: %#v", cmds)
+	}
+	if s.backoffDelay != time.Second {
+		t.Fatalf("stale establish timer reset backoffDelay to %v, want 1s", s.backoffDelay)
+	}
+	if s.estTimer != 0 {
+		t.Fatalf("stale establish timer not cleared: estTimer = %d", s.estTimer)
+	}
+}
+
 func TestCleanExitDuringKillWindowPropagates(t *testing.T) {
 	s := running(t, "en0/1")
 	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: "en1/1"}) // change debounce
