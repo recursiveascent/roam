@@ -1,27 +1,30 @@
 # roam
 
-roam is a modern, event-driven successor to [autossh](https://github.com/autossh/autossh)
-for interactive ssh sessions on macOS. It supervises the system `ssh` binary
-and reconnects the moment the network returns or migrates, instead of waiting
-for a socket timeout or a poll interval. Where autossh polls, roam listens: it
-uses macOS `nw_path_monitor` path events as its primary signal, with keepalives
-as a backstop.
+roam is an event-driven replacement for [autossh](https://github.com/autossh/autossh)
+for interactive ssh sessions on macOS. roam supervises the system `ssh`
+binary. When the network returns or migrates, roam reconnects immediately.
+roam does not wait for a socket timeout or a poll interval. roam uses macOS
+`nw_path_monitor` path events as its primary signal. roam also uses ssh
+keepalives to detect failures that path events do not show.
 
-Typical reconnects: 2–3 s after the network returns, 3–5 s across a live
-migration (the debounce window absorbs interface flapping); 10–15 s for silent
-link death that only keepalives can see.
+Typical reconnect times:
 
-For persistent remote sessions, pair roam with a detachable session manager
-such as [zmx](https://github.com/neurosnap/zmx):
+- 2–3 s after the network returns.
+- 3–5 s across a live migration. The debounce window prevents reactions to
+  rapid interface changes.
+- 10–15 s for a link failure that only keepalives can detect.
+
+For persistent remote sessions, use roam with a detachable session manager,
+for example [zmx](https://github.com/neurosnap/zmx):
 
     roam <remote_host> -t zmx attach <session_name>
 
-roam is generic, though — any interactive ssh session benefits.
+roam does not require zmx. roam operates with all interactive ssh sessions.
 
 ## Requirements
 
-macOS 11.0 (Big Sur) or later on Apple Silicon; macOS 10.15 (Catalina) or
-later on Intel.
+On Apple Silicon, roam requires macOS 11.0 (Big Sur) or later. On Intel,
+roam requires macOS 10.15 (Catalina) or later.
 
 ## Install
 
@@ -31,126 +34,137 @@ later on Intel.
 
     roam [--flags] <ssh args...>
 
-roam's flags come first and use `--name` or `--name=value` form. Everything
-from the first argument not starting with `--` onward passes to ssh verbatim.
-A bare `--` also ends roam's flags.
+Write the roam flags first. Each flag uses the `--name` or `--name=value`
+form. The first argument that does not start with `--` starts the ssh
+arguments. roam sends that argument and all subsequent arguments to ssh
+unchanged. A bare `--` also ends the roam flags.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--debounce=<dur>` | 2s | Wait before acting on a path change; absorbs flapping |
-| `--max-backoff=<dur>` | 30s | Longest retry delay while the path is up but connects fail |
-| `--quiet` | off | Suppress status lines |
-| `--verbose` | off | Log state transitions |
-| `--no-defaults` | off | Do not inject the ssh defaults below |
-| `--ssh=<path>` | `ssh` from PATH | ssh binary to run |
-| `--netmon-debug` | — | Dump raw network path events; ^C to exit (diagnostic) |
-| `--version` | — | Print version |
+| `--debounce=<dur>` | 2s | Delay before roam reacts to a path change; prevents reactions to rapid interface changes |
+| `--max-backoff=<dur>` | 30s | Maximum retry delay while the path is up but connections fail |
+| `--quiet` | off | Do not show status lines |
+| `--verbose` | off | Write a log entry for each state transition |
+| `--no-defaults` | off | Do not add the default ssh options (see below) |
+| `--ssh=<path>` | `ssh` from PATH | Path to the ssh binary |
+| `--netmon-debug` | — | Show raw network path events (diagnostic); press `^C` to exit |
+| `--version` | — | Show the version |
 
 ### Examples
 
-    roam myhost                      # plain interactive session
-    roam -t myhost zmx attach main   # persistent session via zmx
-    roam --max-backoff=10s myhost    # cap retry spacing
-    roam --netmon-debug              # inspect raw path events, ^C to exit
+    roam myhost                      # interactive session
+    roam -t myhost zmx attach main   # persistent session with zmx
+    roam --max-backoff=10s myhost    # limit the retry delay
+    roam --netmon-debug              # show raw path events; press ^C to exit
     kill -USR1 $(pgrep roam)         # force an immediate reconnect
 
 ## Resumable remote sessions
 
-Adapted from [zmx's ssh workflow](https://github.com/neurosnap/zmx#ssh-workflow):
-a wildcard Host entry in `~/.ssh/config` turns each ssh alias into its own
-persistent session:
+This procedure comes from [zmx's ssh workflow](https://github.com/neurosnap/zmx#ssh-workflow).
+A wildcard `Host` entry in `~/.ssh/config` connects each ssh alias to its
+own persistent session:
 
     Host d.*
         HostName 192.168.1.xxx
         RemoteCommand zmx attach %k
         RequestTTY yes
 
-`%k` expands to the alias you typed, so each alias names its own session —
-one native terminal window each, no `-t` needed (`RequestTTY` covers it):
+ssh expands `%k` to the alias that you typed. Thus each alias identifies its
+own session, in one native terminal window. The `-t` option is not necessary
+because `RequestTTY` requests a tty:
 
     roam d.term
     roam d.irc
     roam d.dotfiles
 
-`zmx attach` creates or reattaches, so a reconnect after a network drop
-lands back in the same session. Detaching or `exit` ends roam cleanly; only
-a connection error reconnects.
+`zmx attach` creates a session or attaches to an existing session. After a
+network drop, roam reconnects to the same session. A detach or an `exit`
+command stops roam. Only a connection error causes a reconnect.
 
-Where zmx's README wraps this in an `autossh -M 0 -q` alias, roam needs no
-alias — `roam d.term` is already the resumable command. The original entry
-also sets `ControlMaster`/`ControlPersist` to share one TCP connection; omit
-those with roam (see Behavior below) — each window reconnects independently.
+zmx's README puts this configuration in an `autossh -M 0 -q` alias. roam
+does not need an alias: `roam d.term` is the resumable command. The original
+entry also sets `ControlMaster` and `ControlPersist` to share one TCP
+connection. Do not set these two options with roam (see Behavior below).
+Each window reconnects independently.
 
-## Injected ssh defaults
+## Default ssh options
 
-Unless you pass the option yourself (or use `--no-defaults`), roam prepends:
+roam adds these ssh options before your arguments:
 
     -o ServerAliveInterval=5  -o ServerAliveCountMax=2  -o ConnectTimeout=5
 
-Keepalives detect drops the path monitor cannot see. roam scans only the ssh
-options before the destination (walking grouped short options the way ssh's
-getopt does), and option names are matched case-insensitively in both
-`Name=value` and `Name value` form.
+roam does not add an option if you supply that option, or if you use
+`--no-defaults`. Keepalives detect connection failures that the path monitor
+cannot see. roam examines only the ssh options before the destination. roam
+parses grouped short options the same way that ssh's getopt does. roam
+matches option names without case sensitivity, in both `Name=value` and
+`Name value` form.
 
-Caveat: a command-line `-o` overrides `ssh_config`, so an injected default
-overrides a per-host config value. The escape hatches are `--no-defaults` or
-passing the option yourself. roam does not inject `-t`; tty allocation stays
-in ssh_config or your args.
+Caution: a command-line `-o` option has priority over `ssh_config`. Thus a
+default option from roam replaces a per-host configuration value. To prevent
+this, use `--no-defaults` or supply the option yourself. roam does not add
+`-t`. Control tty allocation in `ssh_config` or in your ssh arguments.
 
 ## Behavior
 
-- ssh owns your terminal directly — roam does no PTY proxying. Escape
-  sequences, prompts, and raw mode work exactly as with bare ssh. roam
-  snapshots your terminal attributes at startup and restores them after
-  each child exit, so a force-killed ssh cannot leave the terminal raw.
-- ssh exit status 255 means "connection error": roam reconnects. Any other
-  exit (zmx detach, `exit`, a finished command) ends roam with that status.
-  This is ssh's own ambiguity: a remote command that itself exits 255 is
-  indistinguishable from a connection error, so roam retries it; `^C` stops
-  the loop.
-- **Quitting:** `~.` makes ssh exit 255, so roam reconnects rather than
-  quits. To quit entirely, type `~.` and then `^C` during the visible
-  `[roam: reconnecting…]` gap. `^C` always quits roam while the link is
-  down. `~^Z` is unsupported (ssh suspends alone, not roam).
+- ssh controls your terminal directly. roam does not proxy the PTY. Escape
+  sequences, prompts, and raw mode operate the same as with bare ssh. At
+  startup, roam records your terminal attributes. After each child exit,
+  roam restores those attributes. Thus a killed ssh process cannot leave
+  the terminal in raw mode.
+- ssh exit status 255 indicates a connection error. roam then reconnects.
+  Each other exit status stops roam with that status. Examples: a zmx
+  detach, an `exit` command, a completed command. ssh gives status 255 both
+  for a connection error and for a remote command that exits 255. Thus roam
+  retries in both cases. Press `^C` to stop the loop.
+- **To stop roam:** the `~.` sequence causes ssh to exit with status 255.
+  Thus roam reconnects; roam does not stop. To stop roam fully, type `~.`.
+  Then press `^C` while roam shows `[roam: reconnecting…]`. While the link
+  is down, `^C` always stops roam. roam does not support `~^Z` (ssh
+  suspends alone; roam continues).
 - `kill -USR1 <roam pid>` forces an immediate reconnect.
-- roam watches the machine's default network path; when that path runs
-  entirely over a tunnel (full-tunnel VPN, Tailscale exit node), it also
-  watches the wifi and wired underlay so physical migrations stay visible.
-  Changes below the fingerprint's resolution (relay switches, ProxyJump
-  hops, a hotspot handoff on the same wifi interface) are covered by the
-  injected keepalives within 10–15 s.
-- **ControlPersist is discouraged with roam.** roam does not manage mux
-  masters; a dead persistent master squatting on the control socket can
-  break reconnects until it exits on its own.
+- roam monitors the machine's default network path. When that path runs
+  fully over a tunnel, roam also monitors the wifi and wired networks below
+  it. Examples of full tunnels: a full-tunnel VPN, a Tailscale exit node.
+  Thus roam can see physical migrations. The default keepalives detect, in
+  10–15 s, changes that the path fingerprint cannot show. Examples: relay
+  switches, ProxyJump hops, a hotspot handoff on the same wifi interface.
+- **Do not use ControlPersist with roam.** roam does not manage mux
+  masters. A dead persistent master can hold the control socket. This
+  blocks reconnects until the master exits.
 
 ### Exit status
 
-roam exits with the child ssh's exit status for any non-255 exit. For
-connection errors it loops under backoff until interrupted. On signals:
-`^C` (SIGINT) exits 130, `SIGTERM` exits 143. A remote command that exits
-255 loops — stop it with `^C`.
+For each exit status other than 255, roam exits with the child ssh's
+status. For a connection error, roam retries with backoff until you
+interrupt it. `^C` (SIGINT) causes exit status 130. `SIGTERM` causes exit
+status 143. A remote command that exits 255 causes a retry loop. Press
+`^C` to stop the loop.
 
-## Coming from autossh
+## Comparison with autossh
 
 roam is a native macOS replacement for autossh for interactive sessions.
-The mental model is the same — a supervisor that restarts ssh — but the
-trigger is a path event, not a timer or a socket probe.
+roam and autossh both supervise ssh and restart it. roam's trigger is a
+path event, not a timer or a socket probe.
 
-- `kill -USR1 <roam pid>` forces a reconnect, just like autossh.
-- `~.` reconnects rather than quits, the same ambiguity autossh has; quit
-  with `~.` then `^C` during the reconnect gap.
-- No daemon mode, no forward health checks, no `AUTOSSH_GATETIME`. roam is
-  for interactive sessions. Unattended tunnels mostly work through the
-  exit-255 rules but are not a design target; keep autossh for that job.
-- ControlPersist: autossh can coexist with a mux master you set up; roam
-  does not manage masters and a stale master can block reconnects, so
-  avoid ControlPersist with roam.
-- macOS only. On other platforms, keep autossh.
+- `kill -USR1 <roam pid>` forces a reconnect. autossh has the same
+  behavior.
+- `~.` causes a reconnect; it does not stop roam. autossh has the same
+  ambiguity. To stop roam, type `~.`. Then press `^C` in the reconnect gap.
+- roam has no daemon mode, no forward health checks, and no
+  `AUTOSSH_GATETIME`. roam's target is interactive sessions. Unattended
+  tunnels usually operate correctly through the exit-255 rules, but they
+  are not a design target. Use autossh for unattended tunnels.
+- autossh can operate together with a mux master that you configure. roam
+  does not manage masters. A stale master can block reconnects. Do not use
+  ControlPersist with roam.
+- roam operates only on macOS. On other platforms, use autossh.
 
 ## Diagnostics
 
-- `roam --verbose` logs state transitions with reasons.
-- `roam --netmon-debug` prints raw path events (`satisfied=… fingerprint=…`)
-  so you can see exactly what roam sees; `^C` to exit. Useful when a
-  migration isn't being detected.
-- `roam --quiet` silences status lines for non-interactive use.
+- `roam --verbose` writes a log entry, with a reason, for each state
+  transition.
+- `roam --netmon-debug` shows raw path events (`satisfied=… fingerprint=…`).
+  This output shows exactly what roam sees. Press `^C` to exit. Use this
+  mode when roam does not detect a migration.
+- `roam --quiet` removes status lines for non-interactive use.
