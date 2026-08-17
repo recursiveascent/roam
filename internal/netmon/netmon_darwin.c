@@ -89,10 +89,15 @@ static void watch_underlay(nw_interface_type_t type, char *fp, size_t n,
 }
 
 void roam_netmon_start(void) {
-	queue = dispatch_queue_create("roam.netmon", DISPATCH_QUEUE_SERIAL);
-	watch_default();
-	watch_underlay(nw_interface_type_wifi, wifi_fp, sizeof wifi_fp,
-	               seen_wifi);
-	watch_underlay(nw_interface_type_wired, wired_fp, sizeof wired_fp,
-	               seen_wired);
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		// The monitors and queue live for the process lifetime and are
+		// deliberately never released.
+		queue = dispatch_queue_create("roam.netmon", DISPATCH_QUEUE_SERIAL);
+		watch_default();
+		watch_underlay(nw_interface_type_wifi, wifi_fp, sizeof wifi_fp,
+		               seen_wifi);
+		watch_underlay(nw_interface_type_wired, wired_fp, sizeof wired_fp,
+		               seen_wired);
+	});
 }

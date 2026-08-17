@@ -22,8 +22,9 @@ type Event struct {
 
 var events = make(chan Event, 16)
 
-// Start begins monitoring and returns the event channel. Call Start once per
-// process; the first report is the current path state.
+// Start begins monitoring and returns the event channel. The first report
+// is the current path state. Calls after the first are no-ops that return
+// the same channel.
 func Start() <-chan Event {
 	C.roam_netmon_start()
 	return events

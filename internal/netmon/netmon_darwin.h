@@ -3,6 +3,7 @@
 
 // Starts the default-path monitor on a private dispatch queue. Each update
 // calls the Go-exported netmonPathUpdate with a complete snapshot.
+// Idempotent: only the first call starts the monitors.
 void roam_netmon_start(void);
 
 #endif

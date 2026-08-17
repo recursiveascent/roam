@@ -5,6 +5,11 @@ internet). Use a zmx session: `roam <host>` with ssh_config supplying
 `RequestTTY yes` and the `zmx attach` command, or pass them explicitly:
 `roam -t <host> zmx attach main`.
 
+Before the manual pass, run the automated sanitizer check for the C
+network monitor: `make -C internal/netmon/testdata check`. It builds the
+monitor under TSan and ASan+UBSan and verifies one combined report from a
+double start.
+
 For each step, note the observed reconnect time. Expected times: 2–3 s
 after the network returns; 3–5 s for a live migration (debounce included);
 10–15 s for drops only keepalives can see.
