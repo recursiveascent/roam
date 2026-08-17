@@ -1,13 +1,97 @@
 package main
 
 import (
+	"bufio"
+	"errors"
+	"os"
+	"os/exec"
 	"slices"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/paulsmith/roam/internal/netmon"
 	"github.com/paulsmith/roam/internal/supervisor"
 )
+
+// When ROAM_TEST_RUN is set, TestMain runs the roam program instead of the
+// tests. Signal dispositions are per-process, so a test of them must start
+// a real child process that runs the real program.
+func TestMain(m *testing.M) {
+	if args, ok := os.LookupEnv("ROAM_TEST_RUN"); ok {
+		os.Exit(run(strings.Fields(args)))
+	}
+	os.Exit(m.Run())
+}
+
+// A Ctrl-\ in a cooked tty sends SIGQUIT to all processes in the foreground
+// group. The supervisor must drop the signal and must not die in the Go
+// runtime's stack-dump exit. The tty is cooked during connects and
+// reconnects, and that is when the user is most likely to press the detach
+// key.
+func TestRunSurvivesSIGQUIT(t *testing.T) {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "ROAM_TEST_RUN=--verbose --no-defaults --ssh=/bin/sleep 30")
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
+
+	// The first verbose event line shows that the event loop runs. Signal
+	// registration comes before the loop in run, so it is complete at this
+	// point.
+	var seen []string
+	deadline := time.After(10 * time.Second)
+ready:
+	for {
+		select {
+		case ln, ok := <-lines:
+			if !ok {
+				t.Fatalf("roam exited before first event; stderr:\n%s", strings.Join(seen, "\n"))
+			}
+			seen = append(seen, ln)
+			if strings.Contains(ln, "[roam:") {
+				break ready
+			}
+		case <-deadline:
+			t.Fatalf("no event within 10s; stderr:\n%s", strings.Join(seen, "\n"))
+		}
+	}
+
+	cmd.Process.Signal(syscall.SIGQUIT)
+	time.Sleep(100 * time.Millisecond)
+	cmd.Process.Signal(syscall.SIGTERM)
+
+	for ln := range lines {
+		seen = append(seen, ln)
+	}
+	err = cmd.Wait()
+	all := strings.Join(seen, "\n")
+	if strings.Contains(all, "SIGQUIT: quit") {
+		t.Fatalf("supervisor died with a runtime stack dump:\n%s", all)
+	}
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	}
+	if code != 143 {
+		t.Fatalf("exit code = %d, want 143 (clean SIGTERM shutdown); stderr:\n%s", code, all)
+	}
+}
 
 func TestPartition(t *testing.T) {
 	tests := []struct {

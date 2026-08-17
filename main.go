@@ -228,8 +228,14 @@ func run(args []string) int {
 	pathc := make(chan supervisor.PathEvent, 16)
 	go forwardPathEvents(netmon.Start(), pathc, netmonStartTimeout)
 
+	// The Notify set includes SIGQUIT only to disable the Go runtime's
+	// stack-dump exit. The tty is cooked while ssh connects and between
+	// reconnects. In that state, the kernel turns Ctrl-\ into a local
+	// SIGQUIT and does not send it to the remote. The supervisor must
+	// survive this signal. The signal maps to no event, so the supervisor
+	// drops it.
 	sigc := make(chan os.Signal, 8)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1, syscall.SIGQUIT)
 
 	var debugf func(string, ...any)
 	if f.verbose {
