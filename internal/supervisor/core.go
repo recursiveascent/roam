@@ -195,6 +195,14 @@ func decidePath(s state, e pathEvent) (state, []command) {
 			}
 			return s, nil
 		}
+		if s.childFP == "" {
+			// The child was spawned before the monitor's first report
+			// (the fail-open path). Adopt the first real fingerprint as
+			// the baseline instead of treating it as a migration.
+			s.childFP = e.fingerprint
+			s.clearPending()
+			return s, nil
+		}
 		if e.fingerprint == s.childFP {
 			// Back on the child's own path: cancel any pending transition.
 			s.clearPending()
@@ -294,6 +302,13 @@ func decideExit(s state, e childExited) (state, []command) {
 		if s.quitOnExit {
 			s.kind = stateDone
 			return s, []command{exitProgram{code: s.quitCode}}
+		}
+		if !e.signaled && e.code != 255 {
+			// The child beat the kill to a clean exit of its own (zmx
+			// detach, `exit`): user intent, not link death. Our kills
+			// always end in a signal death or ssh's 255.
+			s.kind = stateDone
+			return s, []command{exitProgram{code: e.code}}
 		}
 		if s.pathUp {
 			return s, spawn(&s, true)

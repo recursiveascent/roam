@@ -89,21 +89,50 @@ var sshValueFlags = map[byte]bool{
 	'R': true, 'S': true, 'W': true, 'w': true,
 }
 
+// scanOptions walks the leading ssh option arguments and returns the index
+// where the destination begins (len(args) if none). ssh accepts grouped
+// short options (-tp 2222 is -t plus -p taking the next argument, -vo X is
+// -v plus -o X), so each dash cluster is walked character by character: the
+// first value-taking flag consumes the glued remainder or the next
+// argument. visit, if non-nil, receives each value-taking flag and its
+// value.
+func scanOptions(args []string, visit func(flag byte, value string)) int {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "" || a == "-" || a[0] != '-' {
+			return i
+		}
+		for j := 1; j < len(a); j++ {
+			if !sshValueFlags[a[j]] {
+				continue // boolean flag; the next char is another flag
+			}
+			value := ""
+			if j == len(a)-1 {
+				if i+1 < len(args) {
+					i++
+					value = args[i]
+				}
+			} else {
+				value = a[j+1:]
+			}
+			if visit != nil {
+				visit(a[j], value)
+			}
+			break
+		}
+	}
+	return len(args)
+}
+
 // splitAtDestination divides ssh args into the options before the
 // destination and everything from the destination on (the destination and
 // the remote command). With no destination found, rest is nil.
 func splitAtDestination(args []string) (opts, rest []string) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "" || a[0] != '-' {
-			return args[:i], args[i:]
-		}
-		if len(a) == 2 && sshValueFlags[a[1]] {
-			i++ // the value is the next argument
-		}
-		// Glued values (-p2222) and boolean flags occupy one argument.
+	i := scanOptions(args, nil)
+	if i == len(args) {
+		return args, nil
 	}
-	return args, nil
+	return args[:i], args[i:]
 }
 
 // sshDefaults are injected unless the user passes the same option among the
@@ -115,26 +144,26 @@ var sshDefaults = []string{
 	"ConnectTimeout=5",
 }
 
-func injectDefaults(args []string) []string {
-	opts, _ := splitAtDestination(args)
-	supplied := map[string]bool{}
-	for i, a := range opts {
-		var opt string
-		switch {
-		case a == "-o" && i+1 < len(opts):
-			opt = opts[i+1]
-		case strings.HasPrefix(a, "-o") && len(a) > 2:
-			opt = a[2:]
-		default:
-			continue
-		}
-		name, _, _ := strings.Cut(opt, "=")
-		supplied[strings.ToLower(strings.TrimSpace(name))] = true
+// optionName extracts the lowercase option keyword from an -o argument,
+// accepting both "Name=value" and ssh_config's "Name value" form.
+func optionName(opt string) string {
+	name, _, _ := strings.Cut(opt, "=")
+	if fields := strings.Fields(name); len(fields) > 0 {
+		name = fields[0]
 	}
+	return strings.ToLower(name)
+}
+
+func injectDefaults(args []string) []string {
+	supplied := map[string]bool{}
+	scanOptions(args, func(flag byte, value string) {
+		if flag == 'o' {
+			supplied[optionName(value)] = true
+		}
+	})
 	var out []string
 	for _, d := range sshDefaults {
-		name, _, _ := strings.Cut(d, "=")
-		if !supplied[strings.ToLower(name)] {
+		if !supplied[optionName(d)] {
 			out = append(out, "-o", d)
 		}
 	}
@@ -149,7 +178,9 @@ func forwardPathEvents(in <-chan netmon.Event, out chan<- supervisor.PathEvent, 
 	case e := <-in:
 		out <- supervisor.PathEvent{Satisfied: e.Satisfied, Fingerprint: e.Fingerprint}
 	case <-time.After(timeout):
-		out <- supervisor.PathEvent{Satisfied: true, Fingerprint: "netmon-silent"}
+		// An empty fingerprint means "baseline unknown": the core adopts
+		// the first real report instead of treating it as a migration.
+		out <- supervisor.PathEvent{Satisfied: true}
 	}
 	for e := range in {
 		out <- supervisor.PathEvent{Satisfied: e.Satisfied, Fingerprint: e.Fingerprint}

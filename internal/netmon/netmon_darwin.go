@@ -10,8 +10,11 @@ package netmon
 */
 import "C"
 
-// Event is one path report. Fingerprint is the ordered interface list
-// (name/type); a change in fingerprint means the default path migrated.
+// Event is one path report. Fingerprint is an opaque snapshot of the
+// default path's ordered interface list (name/type); when the default path
+// runs entirely over tunnels, it also carries the wifi and wired underlay
+// interfaces, so physical migrations stay visible behind a full-tunnel
+// VPN. A change in fingerprint means the path migrated.
 type Event struct {
 	Satisfied   bool
 	Fingerprint string

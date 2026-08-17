@@ -65,10 +65,12 @@ config value.
   `[roam: reconnecting…]` gap. `^C` always quits roam while the link is
   down. `~^Z` is unsupported.
 - `kill -USR1 <roam pid>` forces an immediate reconnect.
-- roam watches the machine's default network path. Migrations that only
-  concern overlay or proxy layers (Tailscale relay switches, ProxyJump
-  hops) are invisible to it; the injected keepalives cover those within
-  10–15 s.
+- roam watches the machine's default network path; when that path runs
+  entirely over a tunnel (full-tunnel VPN, Tailscale exit node), it also
+  watches the wifi and wired underlay so physical migrations stay
+  visible. Changes below the fingerprint's resolution (relay switches,
+  ProxyJump hops, a hotspot handoff on the same wifi interface) are
+  covered by the injected keepalives within 10–15 s.
 - **ControlPersist is discouraged with roam.** roam does not manage mux
   masters; a dead persistent master squatting on the control socket can
   break reconnects until it exits on its own.

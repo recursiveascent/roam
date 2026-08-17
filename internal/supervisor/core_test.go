@@ -416,6 +416,50 @@ func TestPathDownInBackoffWaits(t *testing.T) {
 	}
 }
 
+func TestCleanExitDuringKillWindowPropagates(t *testing.T) {
+	s := running(t, "en0/1")
+	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: "en1/1"}) // change debounce
+	s, _ = decide(s, timerFired{id: 2})                                // killChild dispatched
+	// the child beat the SIGTERM to a clean self-exit (user typed exit)
+	_, cmds := decide(s, childExited{code: 0})
+	if !reflect.DeepEqual(cmds, []command{exitProgram{code: 0}}) {
+		t.Fatalf("cmds = %#v, want exitProgram{0}", cmds)
+	}
+}
+
+func TestOurKillStillRespawns(t *testing.T) {
+	s := running(t, "en0/1")
+	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: "en1/1"})
+	s, _ = decide(s, timerFired{id: 2})
+	// ssh's own SIGTERM handler exits 255: that is our kill, not user intent
+	_, cmds := decide(s, childExited{code: 255})
+	if !containsCommand(cmds, spawnChild{}) {
+		t.Fatalf("cmds = %#v, want respawn", cmds)
+	}
+}
+
+func TestUnknownBaselineAdoptsFirstFingerprint(t *testing.T) {
+	// fail-open: the child was spawned before the monitor's first report,
+	// so its baseline fingerprint is empty
+	s := initialState(defaultConfig())
+	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: ""})
+	if s.kind != stateRunning || s.childFP != "" {
+		t.Fatalf("setup: kind = %v childFP = %q", s.kind, s.childFP)
+	}
+	s, cmds := decide(s, pathEvent{satisfied: true, fingerprint: "d:en0/1,"})
+	if len(cmds) != 0 {
+		t.Fatalf("first real report: cmds = %#v, want none (adopted)", cmds)
+	}
+	if s.childFP != "d:en0/1," {
+		t.Fatalf("childFP = %q, want adopted baseline", s.childFP)
+	}
+	// after adoption, a genuinely different report is a migration again
+	_, cmds = decide(s, pathEvent{satisfied: true, fingerprint: "d:en1/1,"})
+	if len(cmds) != 1 {
+		t.Fatalf("post-adoption migration: cmds = %#v, want debounce timer", cmds)
+	}
+}
+
 func TestInterruptWhileDisconnectedExits(t *testing.T) {
 	s := initialState(defaultConfig())
 	s, cmds := decide(s, gotSignal{kind: sigInterrupt})

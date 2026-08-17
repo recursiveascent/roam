@@ -96,9 +96,12 @@ Flags:
 
 roam injects these options ahead of user arguments. It injects each option
 only if the user did not pass that option. roam scans only the ssh options
-that come before the destination (both `-o X` and `-oX` forms; ssh option
-names are case-insensitive, so the scan is too). Arguments after the
-destination are the remote command; roam does not scan them.
+that come before the destination. The scan walks grouped short options the
+way ssh's getopt does (`-tp 2222` is `-t` plus `-p 2222`; `-vo X` is `-v`
+plus `-o X`; glued `-oX` too) and accepts both option forms, `Name=value`
+and ssh_config's `Name value`. Option names are case-insensitive, so the
+scan is too. Arguments after the destination are the remote command; roam
+does not scan them.
 
 - `-o ServerAliveInterval=5`
 - `-o ServerAliveCountMax=2`
@@ -137,12 +140,17 @@ a thin shell. The shell executes what the core decides.
     so no signal or path event can observe a running state without a
     child.
 - **`internal/netmon`** — cgo layer over `nw_path_monitor` (Network.framework
-  C API; a dispatch queue plus an exported Go callback). The C update
-  handler builds the complete event in one snapshot — satisfied state plus
-  a fingerprint of the ordered interface list (name and type) — and passes
-  it to Go. The Go side performs a latest-wins channel send: when the
-  channel is full, it drops the oldest report, because only the newest
-  path state matters. netmon holds no policy and no debouncing.
+  C API; one serial dispatch queue plus an exported Go callback). Three
+  monitors feed one combined snapshot: the default path, plus wifi and
+  wired underlay monitors. The first report waits until all three have
+  delivered their initial state, so partial startup snapshots cannot look
+  like migrations. The fingerprint carries the default path's ordered
+  interface list (name and type); when the default path runs entirely
+  over tunnels (full-tunnel VPN, Tailscale exit node), the wifi and wired
+  underlay sections join it, so physical migrations stay visible. The Go
+  side performs a latest-wins channel send: when the channel is full, it
+  drops the oldest report, because only the newest path state matters.
+  netmon holds no policy and no debouncing.
 - **`internal/status`** — stderr printer. It prints only when stderr is a
   tty and `--quiet` is not set. Lines look like
   `[roam: link down — waiting for network]` and `[roam: reconnecting…]`.
@@ -159,12 +167,16 @@ All identifiers are unexported except what `main` needs.
 ### What the fingerprint means
 
 The fingerprint identifies the machine's default network path, not the
-route ssh traffic takes. Tailscale, ProxyJump, ProxyCommand, and
-per-destination routing are invisible to it. Changes those layers absorb
-without a default-path change are covered by the keepalive fallback, not
-by path events. The fingerprint deliberately excludes addresses: IPv6
-temporary-address rotation must not reconnect a healthy session, and a
-same-interface address change is caught by keepalives within 10–15 s.
+route ssh traffic takes. When the default path includes a physical
+interface, the fingerprint is that path alone; when it runs entirely over
+tunnels, the wifi and wired underlay interfaces join it, so a physical
+migration behind a full-tunnel VPN still changes the fingerprint.
+ProxyJump, ProxyCommand, and per-destination routing remain invisible.
+Changes those layers absorb without a fingerprint change are covered by
+the keepalive fallback, not by path events. The fingerprint deliberately
+excludes addresses: IPv6 temporary-address rotation must not reconnect a
+healthy session, and a same-interface change (a hotspot switch that keeps
+the same wifi interface) is caught by keepalives within 10–15 s.
 
 netmon is built and human-verified first (a spike task) against wifi
 toggles, hotspot handoff, ethernet plug-in, and Tailscale up/down, before
@@ -264,7 +276,14 @@ roam is discouraged and documented. Master-aware handling is future work.
   failures, it prints `persistent failures — check args; ^C to quit` and
   continues to retry at max backoff.
 - **Monitor never reports.** The netmon adapter synthesizes a satisfied
-  event after 3 s and roam proceeds; ssh's own timeouts govern from there.
+  event with an empty fingerprint after 3 s and roam proceeds; ssh's own
+  timeouts govern from there. An empty baseline means "unknown": the core
+  adopts the monitor's first real fingerprint instead of treating it as a
+  migration, so a late-waking monitor cannot reconnect a healthy session.
+- **A kill races a clean exit.** After roam dispatches a kill, a child
+  exit that is neither a signal death nor ssh's 255 means the user beat
+  the kill (zmx detach, `exit`). roam propagates that exit instead of
+  reconnecting.
 - **Wake from sleep.** Interfaces reattach on wake and `nw_path_monitor`
   fires. Keepalives are the backstop. IOKit wake notifications are future
   work; add them only if gaps appear in practice.

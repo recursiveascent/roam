@@ -50,6 +50,10 @@ func TestSplitAtDestination(t *testing.T) {
 			[]string{"-p2222"}, []string{"d.term"}},
 		{"boolean flags", []string{"-4", "-tt", "d.term", "zmx", "attach"},
 			[]string{"-4", "-tt"}, []string{"d.term", "zmx", "attach"}},
+		{"grouped boolean+value flag", []string{"-tp", "2222", "d.term"},
+			[]string{"-tp", "2222"}, []string{"d.term"}},
+		{"grouped -vo takes next arg", []string{"-vo", "ConnectTimeout=17", "d.term"},
+			[]string{"-vo", "ConnectTimeout=17"}, []string{"d.term"}},
 		{"no destination", []string{"-p", "2222"},
 			[]string{"-p", "2222"}, nil},
 	}
@@ -92,6 +96,21 @@ func TestInjectDefaults(t *testing.T) {
 			"-o", "ConnectTimeout=5",
 			"d.term", "some-tool", "-oConnectTimeout=1",
 		}},
+		{"whitespace option form wins", []string{"-o", "ConnectTimeout 17", "d.term"}, []string{
+			"-o", "ServerAliveInterval=5",
+			"-o", "ServerAliveCountMax=2",
+			"-o", "ConnectTimeout 17", "d.term",
+		}},
+		{"grouped -vo option wins", []string{"-vo", "ConnectTimeout=17", "d.term"}, []string{
+			"-o", "ServerAliveInterval=5",
+			"-o", "ServerAliveCountMax=2",
+			"-vo", "ConnectTimeout=17", "d.term",
+		}},
+		{"value after grouped -tp is not the destination", []string{"-tp", "2222", "-o", "ServerAliveInterval=99", "d.term"}, []string{
+			"-o", "ServerAliveCountMax=2",
+			"-o", "ConnectTimeout=5",
+			"-tp", "2222", "-o", "ServerAliveInterval=99", "d.term",
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,8 +127,8 @@ func TestForwardPathEventsFailsOpen(t *testing.T) {
 	go forwardPathEvents(in, out, 10*time.Millisecond)
 	select {
 	case e := <-out:
-		if !e.Satisfied {
-			t.Fatalf("synthesized event = %+v, want Satisfied", e)
+		if !e.Satisfied || e.Fingerprint != "" {
+			t.Fatalf("synthesized event = %+v, want Satisfied with empty fingerprint", e)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no synthesized event within 1s")
