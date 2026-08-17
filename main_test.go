@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paulsmith/roam/internal/netmon"
-	"github.com/paulsmith/roam/internal/supervisor"
+	"github.com/recursiveascent/roam/internal/netmon"
+	"github.com/recursiveascent/roam/internal/supervisor"
 )
 
 // When ROAM_TEST_RUN is set, TestMain runs the roam program instead of the

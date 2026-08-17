@@ -25,7 +25,7 @@ later on Intel.
 
 ## Install
 
-    go install github.com/paulsmith/roam@latest
+    go install github.com/recursiveascent/roam@latest
 
 ## Usage
 

@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paulsmith/roam/internal/netmon"
-	"github.com/paulsmith/roam/internal/status"
-	"github.com/paulsmith/roam/internal/supervisor"
+	"github.com/recursiveascent/roam/internal/netmon"
+	"github.com/recursiveascent/roam/internal/status"
+	"github.com/recursiveascent/roam/internal/supervisor"
 )
 
 const version = "0.1.0"

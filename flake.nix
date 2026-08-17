@@ -41,7 +41,7 @@
 
             meta = {
               description = "Event-driven ssh supervisor for macOS, a modern successor to autossh";
-              homepage = "https://github.com/paulsmith/roam";
+              homepage = "https://github.com/recursiveascent/roam";
               license = lib.licenses.mit;
               mainProgram = "roam";
               platforms = supportedSystems;

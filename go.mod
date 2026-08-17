@@ -1,3 +1,3 @@
-module github.com/paulsmith/roam
+module github.com/recursiveascent/roam
 
 go 1.26

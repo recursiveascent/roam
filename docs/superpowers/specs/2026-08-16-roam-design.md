@@ -317,7 +317,7 @@ roam is discouraged and documented. Master-aware handling is future work.
 
 ```
 roam/
-  go.mod                    # module github.com/paulsmith/roam, go 1.26
+  go.mod                    # module github.com/recursiveascent/roam, go 1.26
   main.go                   # flag partitioning, wiring, signal registration
   internal/supervisor/      # core (pure) + shell (event loop) + runner
   internal/netmon/          # cgo nw_path_monitor wrapper, darwin-only

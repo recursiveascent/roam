@@ -5,7 +5,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paulsmith/roam/internal/tty"
+	"github.com/recursiveascent/roam/internal/tty"
 )
 
 // PathEvent reports the network path state. Fingerprint identifies the

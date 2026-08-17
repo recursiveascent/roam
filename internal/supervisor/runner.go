@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paulsmith/roam/internal/tty"
+	"github.com/recursiveascent/roam/internal/tty"
 )
 
 // killEscalation is how long a child gets to honor SIGTERM before SIGKILL.
