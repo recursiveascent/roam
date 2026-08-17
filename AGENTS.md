@@ -1,0 +1,8 @@
+- Only Go stdlib packages
+- Use `go doc` and `gopls` when reading, debugging, exploring, and understanding Go code.
+- Never add sleeps to tests.
+- Brevity, brevity, brevity! Do not do weird defaults; have only one way of doing things; refactor relentlessly as necessary.
+- If something doesn't work, propagate the error or exit or crash. Do not have "fallbacks".
+- Do not keep old methods around for "compatibility"; this is a new project and there are no compatibility concerns yet.
+- Err on the side of not exporting symbols from Go packages, only what is minimally necessary. Don't let this module's API become an accidental support burden.
+- Use `twee`, if available, to drive and inspect TUI sessions while developing or debugging, especially terminal state; prefer `wait stable`/`wait text` and traces over timing guesses.
