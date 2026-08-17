@@ -1,5 +1,7 @@
 # roam
 
+[![CI](https://github.com/recursiveascent/roam/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/recursiveascent/roam/actions/workflows/ci.yaml)
+
 roam is an event-driven replacement for [autossh](https://github.com/autossh/autossh)
 for interactive ssh sessions on macOS. roam supervises the system `ssh`
 binary. When the network returns or migrates, roam reconnects immediately.
