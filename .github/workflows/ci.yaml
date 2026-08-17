@@ -8,8 +8,9 @@ on:
 jobs:
   check:
     # roam is macOS-only (cgo against Network.framework); the flake supports
-    # only aarch64-darwin and x86_64-darwin. macos-latest is Apple Silicon.
-    runs-on: macos-latest
+    # only aarch64-darwin and x86_64-darwin. Pin macOS 15: Network.framework
+    # crashes under TSan on the macOS 26 hosted runner.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
 

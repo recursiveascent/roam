@@ -21,9 +21,12 @@ check-asan: $(BUILD)/harness_asan
 $(BUILD)/harness_tsan: $(SRCS) ../netmon_darwin.h | $(BUILD)
 	$(CC) $(CFLAGS) -fsanitize=thread $(SRCS) -framework Network -o $@
 
+# The SDK's dispatch_once assumption can be false against newer host
+# libdispatch; builtin sanitizer otherwise aborts in the SDK header.
 $(BUILD)/harness_asan: $(SRCS) ../netmon_darwin.h | $(BUILD)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined,nullability \
-		-fno-sanitize-recover=all $(SRCS) -framework Network -o $@
+		-fno-sanitize=builtin -fno-sanitize-recover=all $(SRCS) \
+		-framework Network -o $@
 
 $(BUILD):
 	mkdir -p $(BUILD)
