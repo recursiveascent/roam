@@ -113,30 +113,42 @@ func TestReconnectStatusRendering(t *testing.T) {
 	}
 
 	fakeSSH := filepath.Join(t.TempDir(), "fake-ssh")
-	if err := os.WriteFile(fakeSSH, []byte("#!/bin/sh\nexit 255\n"), 0o755); err != nil {
+	fakeScript := `#!/bin/sh
+marker="` + fakeSSH + `-$PPID"
+quiet=false
+for arg do
+	if test "$arg" = -q; then quiet=true; fi
+done
+if test -e "$marker" && ! $quiet; then
+	echo "ssh: connect to host example.invalid port 22: Network is unreachable" >&2
+fi
+touch "$marker"
+exit 255
+`
+	if err := os.WriteFile(fakeSSH, []byte(fakeScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// roam args reused across both color and no-color runs. --max-backoff
-	// keeps the reconnect loop tight so a transient is always on screen.
-	roamArgs := "--no-defaults --max-backoff=20ms --ssh=" + fakeSSH + " host"
+	// roam args reused across both color and no-color runs. The backoff leaves
+	// a deterministic quiet window after each failed attempt for inspection.
+	roamArgs := "--no-defaults --max-backoff=500ms --ssh=" + fakeSSH + " host"
 
 	runCase := func(t *testing.T, wantDim bool) {
 		t.Helper()
-		// wait for the first transient, then assert it sits in place on
-		// row 0 with (or without) dim color, and that the rest of the
-		// screen is blank.
+		// Wait for the first transient, then inspect the rendered cells: the
+		// status must remain on row 0, keep its dim attribute when enabled,
+		// and leave every row below blank despite failed ssh attempts.
 		ops := []map[string]any{
 			{"op": "wait_text", "args": map[string]any{"text": "[roam: reconnecting", "timeout": "8s"}},
-			{"op": "assert_cell", "args": map[string]any{"x": 0, "y": 0, "predicate": map[string]any{"text": "[", "dim": wantDim}}},
-			{"op": "assert_region", "args": map[string]any{"x": 0, "y": 1, "w": 80, "h": 9, "match": "all", "predicate": map[string]any{"text": ""}}},
+			{"op": "wait_stable", "args": map[string]any{"quiet": "100ms", "timeout": "1s"}},
+			{"op": "snapshot", "args": map[string]any{}},
 		}
 		script, err := json.Marshal(ops)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		cmd := exec.Command("twee", "run", "--cols", "80", "--rows", "10", "--script", "-", "--", os.Args[0])
+		cmd := exec.Command("twee", "run", "--emit", "results", "--cols", "80", "--rows", "10", "--script", "-", "--", os.Args[0])
 		cmd.Stdin = bytes.NewReader(script)
 		cmd.Env = append(os.Environ(), "ROAM_TEST_RUN="+roamArgs)
 		if !wantDim {
@@ -145,6 +157,41 @@ func TestReconnectStatusRendering(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("twee run failed: %v\n%s", err, out)
+		}
+
+		var waitResult, stableResult, snapshotResult struct {
+			Data json.RawMessage
+		}
+		dec := json.NewDecoder(bytes.NewReader(out))
+		if err := dec.Decode(&waitResult); err != nil {
+			t.Fatalf("decode twee wait result: %v\n%s", err, out)
+		}
+		if err := dec.Decode(&stableResult); err != nil {
+			t.Fatalf("decode twee stable result: %v\n%s", err, out)
+		}
+		if err := dec.Decode(&snapshotResult); err != nil {
+			t.Fatalf("decode twee snapshot result: %v\n%s", err, out)
+		}
+		var snapshot struct {
+			Lines []struct {
+				Cells []struct {
+					Text string
+					Dim  bool
+				}
+			}
+		}
+		if err := json.Unmarshal(snapshotResult.Data, &snapshot); err != nil {
+			t.Fatalf("decode twee snapshot: %v\n%s", err, out)
+		}
+		if got := snapshot.Lines[0].Cells[0]; got.Text != "[" || got.Dim != wantDim {
+			t.Fatalf("status first cell = %+v, want text '[' and dim %v", got, wantDim)
+		}
+		for y, line := range snapshot.Lines[1:] {
+			for _, cell := range line.Cells {
+				if cell.Text != "" {
+					t.Fatalf("row %d is not blank; first text cell %q", y+1, cell.Text)
+				}
+			}
 		}
 	}
 
@@ -179,6 +226,30 @@ func TestPartition(t *testing.T) {
 	}
 }
 
+func TestQuietSSHArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"plain destination", []string{"host"}, []string{"-q", "host"}},
+		{"after options", []string{"-v", "-p", "2222", "host"}, []string{"-v", "-p", "2222", "-q", "host"}},
+		{"before option terminator", []string{"--", "host"}, []string{"-q", "--", "host"}},
+		{"option value named terminator", []string{"-F", "--", "host"}, []string{"-F", "--", "-q", "host"}},
+		{"before remote command", []string{"host", "-v"}, []string{"-q", "host", "-v"}},
+		{"log file preserves diagnostics", []string{"-vv", "-E", "ssh.log", "host"}, []string{"-vv", "-E", "ssh.log", "host"}},
+		{"glued log file preserves diagnostics", []string{"-Essh.log", "host"}, []string{"-Essh.log", "host"}},
+		{"syslog preserves diagnostics", []string{"-vy", "host"}, []string{"-vy", "host"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := quietSSHArgs(tt.args); !slices.Equal(got, tt.want) {
+				t.Fatalf("quietSSHArgs = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSplitAtDestination(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -197,6 +268,8 @@ func TestSplitAtDestination(t *testing.T) {
 			[]string{"-tp", "2222"}, []string{"d.term"}},
 		{"grouped -vo takes next arg", []string{"-vo", "ConnectTimeout=17", "d.term"},
 			[]string{"-vo", "ConnectTimeout=17"}, []string{"d.term"}},
+		{"option terminator", []string{"--", "-host"},
+			[]string{"--"}, []string{"-host"}},
 		{"no destination", []string{"-p", "2222"},
 			[]string{"-p", "2222"}, nil},
 	}

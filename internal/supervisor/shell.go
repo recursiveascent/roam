@@ -26,14 +26,15 @@ type Reporter interface {
 
 // Options configures Run.
 type Options struct {
-	SSHPath    string
-	SSHArgs    []string
-	Debounce   time.Duration // 0 = default 2s
-	MaxBackoff time.Duration // 0 = default 30s
-	Report     Reporter      // nil = no status output
-	PathEvents <-chan PathEvent
-	Signals    <-chan os.Signal
-	Debugf     func(format string, args ...any) // nil = no debug log
+	SSHPath          string
+	SSHArgs          []string
+	ReconnectSSHArgs []string
+	Debounce         time.Duration // 0 = default 2s
+	MaxBackoff       time.Duration // 0 = default 30s
+	Report           Reporter      // nil = no status output
+	PathEvents       <-chan PathEvent
+	Signals          <-chan os.Signal
+	Debugf           func(format string, args ...any) // nil = no debug log
 }
 
 // Run supervises ssh until the session ends and returns the exit code.
@@ -46,9 +47,10 @@ func Run(o Options) int {
 		cfg.maxBackoff = o.MaxBackoff
 	}
 	r := &procRunner{
-		sshPath: o.SSHPath,
-		args:    o.SSHArgs,
-		term:    tty.Save(os.Stdin),
+		sshPath:       o.SSHPath,
+		args:          o.SSHArgs,
+		reconnectArgs: o.ReconnectSSHArgs,
+		term:          tty.Save(os.Stdin),
 	}
 	return runShell(cfg, r, o)
 }

@@ -89,21 +89,28 @@ var sshValueFlags = map[byte]bool{
 	'R': true, 'S': true, 'W': true, 'w': true,
 }
 
-// scanOptions walks the leading ssh option arguments and returns the index
-// where the destination begins (len(args) if none). ssh accepts grouped
-// short options (-tp 2222 is -t plus -p taking the next argument, -vo X is
-// -v plus -o X), so each dash cluster is walked character by character: the
-// first value-taking flag consumes the glued remainder or the next
-// argument. visit, if non-nil, receives each value-taking flag and its
-// value.
-func scanOptions(args []string, visit func(flag byte, value string)) int {
+// scanOptions walks the leading ssh option arguments and returns the indexes
+// where the destination begins and a new option should be inserted. Those
+// indexes differ when -- terminates option parsing. ssh accepts grouped short
+// options (-tp 2222 is -t plus -p taking the next argument, -vo X is -v plus
+// -o X), so each dash cluster is walked character by character: the first
+// value-taking flag consumes the glued remainder or the next argument. visit,
+// if non-nil, receives each flag and its optional value.
+func scanOptions(args []string, visit func(flag byte, value string)) (destination, optionEnd int) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			return i + 1, i
+		}
 		if a == "" || a == "-" || a[0] != '-' {
-			return i
+			return i, i
 		}
 		for j := 1; j < len(a); j++ {
-			if !sshValueFlags[a[j]] {
+			flag := a[j]
+			if !sshValueFlags[flag] {
+				if visit != nil {
+					visit(flag, "")
+				}
 				continue // boolean flag; the next char is another flag
 			}
 			value := ""
@@ -116,23 +123,37 @@ func scanOptions(args []string, visit func(flag byte, value string)) int {
 				value = a[j+1:]
 			}
 			if visit != nil {
-				visit(a[j], value)
+				visit(flag, value)
 			}
 			break
 		}
 	}
-	return len(args)
+	return len(args), len(args)
 }
 
 // splitAtDestination divides ssh args into the options before the
 // destination and everything from the destination on (the destination and
 // the remote command). With no destination found, rest is nil.
 func splitAtDestination(args []string) (opts, rest []string) {
-	i := scanOptions(args, nil)
+	i, _ := scanOptions(args, nil)
 	if i == len(args) {
 		return args, nil
 	}
 	return args[:i], args[i:]
+}
+
+func quietSSHArgs(args []string) []string {
+	redirected := false
+	_, i := scanOptions(args, func(flag byte, _ string) {
+		redirected = redirected || flag == 'E' || flag == 'y'
+	})
+	if redirected {
+		return args
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, args[:i]...)
+	out = append(out, "-q")
+	return append(out, args[i:]...)
 }
 
 // sshDefaults are injected unless the user passes the same option among the
@@ -224,6 +245,10 @@ func run(args []string) int {
 	fi, statErr := os.Stderr.Stat()
 	isTTY := statErr == nil && fi.Mode()&os.ModeCharDevice != 0
 	rep := status.New(os.Stderr, isTTY, f.quiet, f.verbose)
+	reconnectSSHArgs := sshArgs
+	if isTTY && !f.quiet {
+		reconnectSSHArgs = quietSSHArgs(sshArgs)
+	}
 
 	pathc := make(chan supervisor.PathEvent, 16)
 	go forwardPathEvents(netmon.Start(), pathc, netmonStartTimeout)
@@ -245,14 +270,15 @@ func run(args []string) int {
 	}
 
 	return supervisor.Run(supervisor.Options{
-		SSHPath:    sshPath,
-		SSHArgs:    sshArgs,
-		Debounce:   f.debounce,
-		MaxBackoff: f.maxBackoff,
-		Report:     rep,
-		PathEvents: pathc,
-		Signals:    sigc,
-		Debugf:     debugf,
+		SSHPath:          sshPath,
+		SSHArgs:          sshArgs,
+		ReconnectSSHArgs: reconnectSSHArgs,
+		Debounce:         f.debounce,
+		MaxBackoff:       f.maxBackoff,
+		Report:           rep,
+		PathEvents:       pathc,
+		Signals:          sigc,
+		Debugf:           debugf,
 	})
 }
 

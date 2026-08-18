@@ -113,7 +113,11 @@ this, use `--no-defaults` or supply the option yourself. roam does not add
   sequences, prompts, and raw mode operate the same as with bare ssh. At
   startup, roam records your terminal attributes. After each child exit,
   roam restores those attributes. Thus a killed ssh process cannot leave
-  the terminal in raw mode.
+  the terminal in raw mode. When roam is rendering interactive reconnect
+  status, reconnect attempts run ssh with `-q` so client diagnostics cannot
+  scroll that status off-screen. Explicit `-E` or `-y` logging is preserved.
+  The initial attempt, `--quiet`, and non-terminal stderr keep ssh's normal
+  diagnostics.
 - ssh exit status 255 indicates a connection error. roam then reconnects.
   Each other exit status stops roam with that status. Examples: a zmx
   detach, an `exit` command, a completed command. ssh gives status 255 both

@@ -23,17 +23,24 @@ type runner interface {
 // procRunner runs the real ssh binary with the session's arguments. The
 // child inherits the terminal directly: no pipes, no PTY proxy.
 type procRunner struct {
-	sshPath    string
-	args       []string
-	term       tty.State
-	escalation time.Duration // 0 = killEscalation
-	cmd        *exec.Cmd
-	cancel     context.CancelFunc
+	sshPath       string
+	args          []string
+	reconnectArgs []string
+	term          tty.State
+	escalation    time.Duration // 0 = killEscalation
+	started       bool
+	cmd           *exec.Cmd
+	cancel        context.CancelFunc
 }
 
 func (r *procRunner) start() error {
+	args := r.args
+	if r.started && r.reconnectArgs != nil {
+		args = r.reconnectArgs
+	}
+	r.started = true
 	ctx, cancel := context.WithCancel(context.Background())
-	c := exec.CommandContext(ctx, r.sshPath, r.args...)
+	c := exec.CommandContext(ctx, r.sshPath, args...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr

@@ -1,10 +1,43 @@
 package supervisor
 
 import (
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestProcRunnerUsesReconnectArgsAfterFirstStart(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "args")
+	scriptPath := filepath.Join(t.TempDir(), "fake-ssh")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGS_LOG\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGS_LOG", logPath)
+
+	r := &procRunner{
+		sshPath:       scriptPath,
+		args:          []string{"initial"},
+		reconnectArgs: []string{"reconnect"},
+	}
+	for range 2 {
+		if err := r.start(); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.wait(); got.code != 0 {
+			t.Fatalf("wait() = %+v, want exit 0", got)
+		}
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "initial\nreconnect\n"; string(got) != want {
+		t.Fatalf("args log = %q, want %q", got, want)
+	}
+}
 
 func TestProcRunnerReportsExitCode(t *testing.T) {
 	r := &procRunner{sshPath: "/bin/sh", args: []string{"-c", "exit 7"}}
