@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: recursiveascent
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Verify tag matches VERSION
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+      - name: Publish GitHub release
+        run: env -u NIX_CFLAGS_COMPILE -u NIX_LDFLAGS -u SDKROOT -u DEVELOPER_DIR goreleaser release --clean
+        shell: 'nix develop -c bash -e {0}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          url="https://github.com/recursiveascent/roam/archive/refs/tags/$tag.tar.gz"
+          sha="$(curl -fsSL "$url" | shasum -a 256 | awk '{print $1}')"
+          {
+            echo 'class Roam < Formula'
+            echo '  desc "Reconnect interactive SSH sessions on macOS network changes"'
+            echo '  homepage "https://github.com/recursiveascent/roam"'
+            echo "  url \"$url\""
+            echo "  sha256 \"$sha\""
+            echo '  license "MIT"'
+            echo
+            echo '  depends_on :macos'
+            echo '  depends_on "go" => :build'
+            echo
+            echo '  def install'
+            echo '    system "go", "build", *std_go_args'
+            echo '  end'
+            echo
+            echo '  test do'
+            echo '    system bin/"roam", "--version"'
+            echo '  end'
+            echo 'end'
+          } > formula.rb
+          blob="$(gh api repos/recursiveascent/homebrew-tap/contents/Formula/roam.rb --jq .sha 2>/dev/null || true)"
+          args=(-X PUT -f message="roam $tag" -f content="$(base64 < formula.rb | tr -d '\n')")
+          [ -n "$blob" ] && args+=(-f sha="$blob")
+          gh api repos/recursiveascent/homebrew-tap/contents/Formula/roam.rb "${args[@]}" --jq '.commit.html_url'

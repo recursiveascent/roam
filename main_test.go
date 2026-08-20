@@ -199,6 +199,21 @@ exit 255
 	t.Run("no_color", func(t *testing.T) { runCase(t, false) })
 }
 
+func TestVersionResolution(t *testing.T) {
+	previous := versionOverride
+	t.Cleanup(func() { versionOverride = previous })
+
+	versionOverride = ""
+	if got := version(); got != "0.1.0" {
+		t.Errorf("version() = %q, want 0.1.0", got)
+	}
+
+	versionOverride = "v9.9.9"
+	if got := version(); got != "v9.9.9" {
+		t.Errorf("version() with override = %q, want v9.9.9", got)
+	}
+}
+
 func TestPartition(t *testing.T) {
 	tests := []struct {
 		name     string

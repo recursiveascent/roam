@@ -30,7 +30,78 @@ roam requires macOS 10.15 (Catalina) or later.
 
 ## Install
 
-    go install github.com/recursiveascent/roam@latest
+### Homebrew
+
+```
+brew install recursiveascent/tap/roam
+```
+
+### Go
+
+```
+go install github.com/recursiveascent/roam@latest
+```
+
+Installs to `$(go env GOPATH)/bin`. Pin a version with `@v0.1.0` instead of
+`@latest`.
+
+### Nix
+
+Run it once without installing:
+
+```
+nix run github:recursiveascent/roam -- myhost
+```
+
+Drop into a shell with it on `$PATH`:
+
+```
+nix shell github:recursiveascent/roam
+```
+
+Install into your profile:
+
+```
+nix profile install github:recursiveascent/roam
+```
+
+Or add it as a flake input:
+
+```nix
+{
+  inputs.roam.url = "github:recursiveascent/roam";
+  # ...
+  environment.systemPackages = [ inputs.roam.packages.${system}.default ];
+}
+```
+
+### Release binaries
+
+Prebuilt tarballs for macOS (amd64 and arm64) are on the
+[releases page](https://github.com/recursiveascent/roam/releases). Download,
+verify, extract, and put `roam` somewhere on your `$PATH`:
+
+```
+tar xzf roam_0.1.0_darwin_arm64.tar.gz
+install -m755 roam /usr/local/bin/
+```
+
+### From source
+
+```
+git clone https://github.com/recursiveascent/roam
+cd roam
+# optionally, `nix develop` first
+make build
+```
+
+Requires Go 1.26 or later and the Xcode command-line tools.
+
+### Verify
+
+```
+roam --version
+```
 
 ## Usage
 

@@ -1,0 +1,28 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=1
+      - CC=/usr/bin/clang
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X 'main.versionOverride={{.Version}}'
+
+archives:
+  - formats:
+      - tar.gz
+    files:
+      - README.md
+      - CHANGELOG.md
+      - COPYING
+
+checksum:
+  name_template: checksums.txt
+
+source:
+  enabled: true

@@ -13,7 +13,7 @@
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
 
-      version = "0.1.0";
+      version = nixpkgs.lib.removeSuffix "\n" (builtins.readFile ./VERSION);
     in
     {
       packages = forAllSystems (
@@ -31,6 +31,12 @@
             # No vendored deps; go.mod has no requires. A fixed-output hash is
             # still required by buildGoModule, and empty deps make it trivial.
             vendorHash = null;
+
+            ldflags = [
+              "-s"
+              "-w"
+              "-X 'main.versionOverride=${version}'"
+            ];
 
             # Network.framework is a system framework present in the default
             # macOS SDK; -framework Network links it without extra buildInputs.
@@ -63,6 +69,7 @@
               go
               gopls
               gotools
+              goreleaser
             ];
 
             # `go build` resolves the SDK sysroot the same way it does for the
@@ -73,5 +80,7 @@
           };
         }
       );
+
+      formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
     };
 }

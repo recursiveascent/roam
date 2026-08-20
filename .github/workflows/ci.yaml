@@ -1,26 +1,27 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   check:
-    # roam is macOS-only (cgo against Network.framework); the flake supports
-    # only aarch64-darwin and x86_64-darwin. Pin macOS 15: Network.framework
-    # crashes under TSan on the macOS 26 hosted runner.
+    # roam is macOS-only (cgo against Network.framework). Pin macOS 15:
+    # Network.framework crashes under TSan on the macOS 26 hosted runner.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Build
-        run: nix develop --command make build
-
-      - name: Check
-        run: nix develop --command make check
+          name: recursiveascent
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - run: nix flake check
+      - run: nix build
+      - run: make check
+        shell: 'nix develop -c bash -e {0}'

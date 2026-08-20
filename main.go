@@ -3,12 +3,14 @@
 package main
 
 import (
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +20,23 @@ import (
 	"github.com/recursiveascent/roam/internal/supervisor"
 )
 
-const version = "0.1.0"
+//go:embed VERSION
+var versionFile string
+
+// versionOverride is set by release and Nix builds.
+var versionOverride string
+
+func version() string {
+	if versionOverride != "" {
+		return versionOverride
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if moduleVersion := bi.Main.Version; moduleVersion != "" && moduleVersion != "(devel)" {
+			return moduleVersion
+		}
+	}
+	return strings.TrimSpace(versionFile)
+}
 
 // netmonStartTimeout bounds the wait for the monitor's first report; past
 // it, roam fails open and lets ssh's own timeouts judge the network.
@@ -222,7 +240,7 @@ func run(args []string) int {
 		return 2
 	}
 	if f.version {
-		fmt.Println("roam " + version)
+		fmt.Println("roam " + version())
 		return 0
 	}
 	if f.netmonDebug {
