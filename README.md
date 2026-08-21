@@ -180,15 +180,38 @@ this, use `--no-defaults` or supply the option yourself. roam does not add
 
 ## Behavior
 
-- ssh controls your terminal directly. roam does not proxy the PTY. Escape
-  sequences, prompts, and raw mode operate the same as with bare ssh. At
-  startup, roam records your terminal attributes. After each child exit,
-  roam restores those attributes. Thus a killed ssh process cannot leave
-  the terminal in raw mode. When roam is rendering interactive reconnect
-  status, reconnect attempts run ssh with `-q` so client diagnostics cannot
-  scroll that status off-screen. Explicit `-E` or `-y` logging is preserved.
-  The initial attempt, `--quiet`, and non-terminal stderr keep ssh's normal
-  diagnostics.
+- ssh controls your terminal directly. roam does not proxy the PTY. SSH stdin
+  and stdout remain attached directly to the terminal, so escape sequences,
+  prompts, and raw mode operate the same as with bare ssh. At startup, roam
+  records your terminal attributes. After each child exit, roam restores those
+  attributes. Thus a killed ssh process cannot leave the terminal in raw mode.
+- When interactive status is enabled, roam streams ssh fd 2 through a narrow
+  filter. Ordinary stderr is preserved. The filter can retain only one final,
+  complete record in one of these OpenSSH forms:
+  - `Read from remote host <host>: <reason>`
+  - `Connection to <host> closed by remote host.`
+  - `Connection to <host> closed.`
+  - `Write failed: <reason>`
+  - `client_loop: send disconnect: <reason>`
+
+  If roam classifies an established session or reconnect attempt as
+  reconnectable, it replaces that final record with its own reconnect or
+  link status. Initial connection, authentication, configuration, and
+  host-key errors remain visible. Matching records also remain visible when
+  ssh exits normally or roam terminates. SSH cannot distinguish its own fd 2
+  output from remote-command stderr, so a remote command that ends with one
+  exact form and exits 255 may also be consolidated under roam's existing
+  exit-255 retry policy.
+- An immediate retry writes a durable `[roam: reconnecting…]` line. Backoff,
+  path-settle, link-down, and persistent-failure waits use an in-place status.
+  roam clears that transient before starting ssh and does not clear or redraw
+  status while ssh owns the terminal.
+- Interactive filtering gives ssh a pipe for fd 2. Bytes remain ordered within
+  stderr, but exact stdout/stderr interleaving is not guaranteed for non-PTY
+  remote commands. `--quiet` and non-terminal stderr preserve direct inherited
+  fd 2 and ssh's normal diagnostics. Interactive reconnect attempts also use
+  ssh `-q`, unless explicit `-E` or `-y` logging is present; roam preserves
+  those logging options.
 - ssh exit status 255 indicates a connection error. roam then reconnects.
   Each other exit status stops roam with that status. Examples: a zmx
   detach, an `exit` command, a completed command. ssh gives status 255 both

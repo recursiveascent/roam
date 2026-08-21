@@ -46,11 +46,17 @@ func TestRunSurvivesSIGQUIT(t *testing.T) {
 
 	lines := make(chan string, 64)
 	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			lines <- sc.Text()
+		r := bufio.NewReader(stderr)
+		for {
+			line, err := r.ReadString('\n')
+			if line != "" {
+				lines <- line
+			}
+			if err != nil {
+				close(lines)
+				return
+			}
 		}
-		close(lines)
 	}()
 
 	// The first verbose event line shows that the event loop runs. Signal
@@ -83,6 +89,9 @@ ready:
 	}
 	err = cmd.Wait()
 	all := strings.Join(seen, "\n")
+	if strings.Contains(all, "\r") {
+		t.Fatalf("non-terminal verbose output contains carriage returns: %q", all)
+	}
 	if strings.Contains(all, "SIGQUIT: quit") {
 		t.Fatalf("supervisor died with a runtime stack dump:\n%s", all)
 	}
@@ -96,14 +105,82 @@ ready:
 	}
 }
 
-// TestReconnectStatusRendering drives the real roam binary under a twee
-// pty through a loop of failing reconnects (a fake ssh that exits 255) and
-// asserts the transient status renders in place on row 0 with dim ANSI
-// color, that rows below stay blank, and that NO_COLOR strips the color
-// while leaving the in-place layout intact.
-//
-// Gated on ROAM_TEST_TWEE=1 and twee on PATH so it never runs in CI without
-// an explicit opt-in: it needs a real PTY and a live network monitor.
+type tweeCell struct {
+	Text string
+	Dim  bool
+}
+
+type tweeLine struct {
+	Cells []tweeCell
+}
+
+type tweeSnapshot struct {
+	Lines []tweeLine
+}
+
+func runTwee(t *testing.T, fakeScript, roamFlags string, ops []map[string]any, env ...string) tweeSnapshot {
+	t.Helper()
+	fakeSSH := filepath.Join(t.TempDir(), "fake-ssh")
+	if err := os.WriteFile(fakeSSH, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script, err := json.Marshal(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	roamArgs := strings.TrimSpace("--no-defaults " + roamFlags + " --ssh=" + fakeSSH + " host")
+	cmd := exec.Command("twee", "run", "--emit", "results", "--cols", "80", "--rows", "16", "--script", "-", "--", os.Args[0])
+	cmd.Stdin = bytes.NewReader(script)
+	cmd.Env = append(os.Environ(), "ROAM_TEST_RUN="+roamArgs)
+	cmd.Env = append(cmd.Env, env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("twee run failed: %v\n%s", err, out)
+	}
+
+	var result struct{ Data json.RawMessage }
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for range ops {
+		if err := dec.Decode(&result); err != nil {
+			t.Fatalf("decode twee result: %v\n%s", err, out)
+		}
+	}
+	var snapshot tweeSnapshot
+	if err := json.Unmarshal(result.Data, &snapshot); err != nil {
+		t.Fatalf("decode twee snapshot: %v\n%s", err, out)
+	}
+	return snapshot
+}
+
+func snapshotText(snapshot tweeSnapshot) string {
+	lines := make([]string, len(snapshot.Lines))
+	for i, line := range snapshot.Lines {
+		var text strings.Builder
+		for _, cell := range line.Cells {
+			text.WriteString(cell.Text)
+		}
+		lines[i] = strings.TrimRight(text.String(), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func snapshotLine(snapshot tweeSnapshot, match string) (tweeLine, bool) {
+	for _, line := range snapshot.Lines {
+		var text strings.Builder
+		for _, cell := range line.Cells {
+			text.WriteString(cell.Text)
+		}
+		if strings.Contains(text.String(), match) {
+			return line, true
+		}
+	}
+	return tweeLine{}, false
+}
+
+// TestReconnectStatusRendering drives the real roam binary and fake ssh
+// clients under a twee PTY. It covers terminal ownership, disconnect
+// consolidation and preservation, wait rendering, and fd inheritance.
 func TestReconnectStatusRendering(t *testing.T) {
 	if os.Getenv("ROAM_TEST_TWEE") != "1" {
 		t.Skip("set ROAM_TEST_TWEE=1 (and have twee on PATH) to run")
@@ -112,91 +189,179 @@ func TestReconnectStatusRendering(t *testing.T) {
 		t.Skip("twee not on PATH")
 	}
 
-	fakeSSH := filepath.Join(t.TempDir(), "fake-ssh")
-	fakeScript := `#!/bin/sh
-marker="` + fakeSSH + `-$PPID"
-quiet=false
-for arg do
-	if test "$arg" = -q; then quiet=true; fi
-done
-if test -e "$marker" && ! $quiet; then
-	echo "ssh: connect to host example.invalid port 22: Network is unreachable" >&2
+	t.Run("established reconnect", func(t *testing.T) {
+		fakeScript := `#!/bin/sh
+marker="$0-$PPID"
+if test ! -e "$marker"; then
+	touch "$marker"
+	trap 'printf "Read from remote host example.invalid: Operation timed out\r\n" >&2; exit 255' TERM
+	printf "session ready\r\n"
+	while :; do read line || :; done
 fi
-touch "$marker"
-exit 255
+trap 'exit 0' TERM
+printf "Last login: Fri Aug 21 07:04:02 2026\r\n"
+while :; do read line || :; done
 `
-	if err := os.WriteFile(fakeSSH, []byte(fakeScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// roam args reused across both color and no-color runs. The backoff leaves
-	// a deterministic quiet window after each failed attempt for inspection.
-	roamArgs := "--no-defaults --max-backoff=500ms --ssh=" + fakeSSH + " host"
-
-	runCase := func(t *testing.T, wantDim bool) {
-		t.Helper()
-		// Wait for the first transient, then inspect the rendered cells: the
-		// status must remain on row 0, keep its dim attribute when enabled,
-		// and leave every row below blank despite failed ssh attempts.
 		ops := []map[string]any{
+			{"op": "wait_text", "args": map[string]any{"text": "session ready", "timeout": "8s"}},
+			{"op": "signal", "args": map[string]any{"name": "SIGUSR1"}},
 			{"op": "wait_text", "args": map[string]any{"text": "[roam: reconnecting", "timeout": "8s"}},
+			{"op": "wait_text", "args": map[string]any{"text": "Last login:", "timeout": "8s"}},
 			{"op": "wait_stable", "args": map[string]any{"quiet": "100ms", "timeout": "1s"}},
 			{"op": "snapshot", "args": map[string]any{}},
 		}
-		script, err := json.Marshal(ops)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		cmd := exec.Command("twee", "run", "--emit", "results", "--cols", "80", "--rows", "10", "--script", "-", "--", os.Args[0])
-		cmd.Stdin = bytes.NewReader(script)
-		cmd.Env = append(os.Environ(), "ROAM_TEST_RUN="+roamArgs)
-		if !wantDim {
-			cmd.Env = append(cmd.Env, "NO_COLOR=1")
-		}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("twee run failed: %v\n%s", err, out)
-		}
-
-		var waitResult, stableResult, snapshotResult struct {
-			Data json.RawMessage
-		}
-		dec := json.NewDecoder(bytes.NewReader(out))
-		if err := dec.Decode(&waitResult); err != nil {
-			t.Fatalf("decode twee wait result: %v\n%s", err, out)
-		}
-		if err := dec.Decode(&stableResult); err != nil {
-			t.Fatalf("decode twee stable result: %v\n%s", err, out)
-		}
-		if err := dec.Decode(&snapshotResult); err != nil {
-			t.Fatalf("decode twee snapshot result: %v\n%s", err, out)
-		}
-		var snapshot struct {
-			Lines []struct {
-				Cells []struct {
-					Text string
-					Dim  bool
+		for _, tt := range []struct {
+			name    string
+			wantDim bool
+			env     []string
+		}{
+			{name: "color", wantDim: true},
+			{name: "no color", env: []string{"NO_COLOR=1"}},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				snapshot := runTwee(t, fakeScript, "", ops, tt.env...)
+				text := snapshotText(snapshot)
+				if strings.Contains(text, "Read from remote host") {
+					t.Fatalf("raw ssh disconnect remained visible:\n%s", text)
 				}
+				line, statusFound := snapshotLine(snapshot, "[roam: reconnecting")
+				_, loginFound := snapshotLine(snapshot, "Last login:")
+				if !statusFound || !loginFound {
+					t.Fatalf("status found=%v login found=%v:\n%s", statusFound, loginFound, text)
+				}
+				for _, cell := range line.Cells {
+					if cell.Text == "[" && cell.Dim != tt.wantDim {
+						t.Fatalf("status dim = %v, want %v", cell.Dim, tt.wantDim)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("initial failure remains visible", func(t *testing.T) {
+		fakeScript := `#!/bin/sh
+marker="$0-$PPID"
+if test ! -e "$marker"; then
+	touch "$marker"
+	printf "Read from remote host example.invalid: Operation timed out\r\n" >&2
+	exit 255
+fi
+printf "reconnect child\r\n"
+trap 'exit 0' TERM
+while :; do read line || :; done
+`
+		ops := []map[string]any{
+			{"op": "wait_text", "args": map[string]any{"text": "reconnect child", "timeout": "8s"}},
+			{"op": "wait_stable", "args": map[string]any{"quiet": "100ms", "timeout": "1s"}},
+			{"op": "snapshot", "args": map[string]any{}},
+		}
+		text := snapshotText(runTwee(t, fakeScript, "", ops))
+		if !strings.Contains(text, "Read from remote host example.invalid: Operation timed out") ||
+			!strings.Contains(text, "[roam: reconnecting") {
+			t.Fatalf("initial diagnostic or replacement status missing:\n%s", text)
+		}
+	})
+
+	t.Run("clean exit flushes final record", func(t *testing.T) {
+		fakeScript := `#!/bin/sh
+printf "Connection to example.invalid closed.\r\n" >&2
+read line
+exit 0
+`
+		ops := []map[string]any{
+			{"op": "key", "args": map[string]any{"key": "Enter"}},
+			{"op": "wait_text", "args": map[string]any{"text": "Connection to example.invalid closed.", "timeout": "8s"}},
+			{"op": "snapshot", "args": map[string]any{}},
+		}
+		text := snapshotText(runTwee(t, fakeScript, "", ops))
+		if !strings.Contains(text, "Connection to example.invalid closed.") || strings.Contains(text, "[roam:") {
+			t.Fatalf("clean exit output:\n%s", text)
+		}
+	})
+
+	t.Run("stdout stderr and verbose output remain visible", func(t *testing.T) {
+		fakeScript := `#!/bin/sh
+marker="$0-$PPID"
+if test ! -e "$marker"; then
+	touch "$marker"
+	printf "child stdout\r\n"
+	printf "remote stderr\r\n" >&2
+	trap 'printf "Read from remote host example.invalid: Operation timed out\r\n" >&2; exit 255' TERM
+	while :; do read line || :; done
+fi
+printf "reconnected child\r\n"
+trap 'exit 0' TERM
+while :; do read line || :; done
+`
+		ops := []map[string]any{
+			{"op": "wait_text", "args": map[string]any{"text": "remote stderr", "timeout": "8s"}},
+			{"op": "signal", "args": map[string]any{"name": "SIGUSR1"}},
+			{"op": "wait_text", "args": map[string]any{"text": "reconnected child", "timeout": "8s"}},
+			{"op": "wait_stable", "args": map[string]any{"quiet": "100ms", "timeout": "1s"}},
+			{"op": "snapshot", "args": map[string]any{}},
+		}
+		text := snapshotText(runTwee(t, fakeScript, "--verbose", ops))
+		for _, want := range []string{"child stdout", "remote stderr", "[roam: event", "reconnected child"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%q missing:\n%s", want, text)
 			}
 		}
-		if err := json.Unmarshal(snapshotResult.Data, &snapshot); err != nil {
-			t.Fatalf("decode twee snapshot: %v\n%s", err, out)
+		if strings.Contains(text, "Read from remote host") {
+			t.Fatalf("raw disconnect remained visible:\n%s", text)
 		}
-		if got := snapshot.Lines[0].Cells[0]; got.Text != "[" || got.Dim != wantDim {
-			t.Fatalf("status first cell = %+v, want text '[' and dim %v", got, wantDim)
+	})
+
+	t.Run("failed reconnect uses transient backoff status", func(t *testing.T) {
+		fakeScript := `#!/bin/sh
+marker="$0-$PPID"
+if test ! -e "$marker"; then
+	touch "$marker"
+	printf "session ready\r\n"
+	trap 'printf "Read from remote host example.invalid: Operation timed out\r\n" >&2; exit 255' TERM
+	while :; do read line || :; done
+fi
+printf "Read from remote host example.invalid: Operation timed out\r\n" >&2
+exit 255
+`
+		ops := []map[string]any{
+			{"op": "wait_text", "args": map[string]any{"text": "session ready", "timeout": "8s"}},
+			{"op": "signal", "args": map[string]any{"name": "SIGUSR1"}},
+			{"op": "wait_text", "args": map[string]any{"text": "[roam: reconnecting", "timeout": "8s"}},
+			{"op": "wait_stable", "args": map[string]any{"quiet": "100ms", "timeout": "500ms"}},
+			{"op": "snapshot", "args": map[string]any{}},
 		}
-		for y, line := range snapshot.Lines[1:] {
-			for _, cell := range line.Cells {
-				if cell.Text != "" {
-					t.Fatalf("row %d is not blank; first text cell %q", y+1, cell.Text)
-				}
+		text := snapshotText(runTwee(t, fakeScript, "--max-backoff=2s", ops))
+		if strings.Contains(text, "Read from remote host") || !strings.Contains(text, "[roam: reconnecting") {
+			t.Fatalf("backoff output:\n%s", text)
+		}
+	})
+
+	t.Run("fd ownership", func(t *testing.T) {
+		fakeScript := `#!/bin/sh
+if test -t 0; then echo fd0=tty; else echo fd0=pipe; fi
+if test -t 1; then echo fd1=tty; else echo fd1=pipe; fi
+if test -t 2; then echo fd2=tty; else echo fd2=pipe; fi
+`
+		ops := []map[string]any{
+			{"op": "wait_text", "args": map[string]any{"text": "fd2=", "timeout": "8s"}},
+			{"op": "snapshot", "args": map[string]any{}},
+		}
+		interactive := snapshotText(runTwee(t, fakeScript, "", ops))
+		for _, want := range []string{"fd0=tty", "fd1=tty", "fd2=pipe"} {
+			if !strings.Contains(interactive, want) {
+				t.Fatalf("interactive %q missing:\n%s", want, interactive)
 			}
 		}
-	}
-
-	t.Run("color", func(t *testing.T) { runCase(t, true) })
-	t.Run("no_color", func(t *testing.T) { runCase(t, false) })
+		quiet := snapshotText(runTwee(t, fakeScript, "--quiet --verbose", ops))
+		for _, want := range []string{"fd0=tty", "fd1=tty", "fd2=tty"} {
+			if !strings.Contains(quiet, want) {
+				t.Fatalf("quiet %q missing:\n%s", want, quiet)
+			}
+		}
+		if strings.Contains(quiet, "reconnecting") {
+			t.Fatalf("quiet status remained visible:\n%s", quiet)
+		}
+	})
 }
 
 func TestVersionResolution(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/recursiveascent/roam/internal/netmon"
 	"github.com/recursiveascent/roam/internal/status"
 	"github.com/recursiveascent/roam/internal/supervisor"
+	"github.com/recursiveascent/roam/internal/tty"
 )
 
 //go:embed VERSION
@@ -260,9 +262,12 @@ func run(args []string) int {
 		sshArgs = injectDefaults(sshArgs)
 	}
 
-	fi, statErr := os.Stderr.Stat()
-	isTTY := statErr == nil && fi.Mode()&os.ModeCharDevice != 0
+	isTTY := tty.IsTerminal(os.Stderr)
 	rep := status.New(os.Stderr, isTTY, f.quiet, f.verbose)
+	var sshStderr io.Writer
+	if isTTY && !f.quiet {
+		sshStderr = rep
+	}
 	reconnectSSHArgs := sshArgs
 	if isTTY && !f.quiet {
 		reconnectSSHArgs = quietSSHArgs(sshArgs)
@@ -282,8 +287,12 @@ func run(args []string) int {
 
 	var debugf func(string, ...any)
 	if f.verbose {
-		debugf = func(format string, a ...any) {
-			fmt.Fprintf(os.Stderr, "[roam: "+format+"]\n", a...)
+		if isTTY && !f.quiet {
+			debugf = rep.Debugf
+		} else {
+			debugf = func(format string, args ...any) {
+				fmt.Fprintf(os.Stderr, "[roam: "+format+"]\n", args...)
+			}
 		}
 	}
 
@@ -294,6 +303,7 @@ func run(args []string) int {
 		Debounce:         f.debounce,
 		MaxBackoff:       f.maxBackoff,
 		Report:           rep,
+		SSHStderr:        sshStderr,
 		PathEvents:       pathc,
 		Signals:          sigc,
 		Debugf:           debugf,

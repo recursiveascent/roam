@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"io"
 	"os"
 	"syscall"
 	"time"
@@ -20,8 +21,12 @@ type PathEvent struct {
 type Reporter interface {
 	LinkDown()
 	Reconnecting()
+	ReconnectNow()
 	Reconnected()
 	PersistentFailures()
+	PrepareChild()
+	ChildStarted()
+	ChildFinished()
 }
 
 // Options configures Run.
@@ -32,6 +37,7 @@ type Options struct {
 	Debounce         time.Duration // 0 = default 2s
 	MaxBackoff       time.Duration // 0 = default 30s
 	Report           Reporter      // nil = no status output
+	SSHStderr        io.Writer     // nil = child inherits os.Stderr
 	PathEvents       <-chan PathEvent
 	Signals          <-chan os.Signal
 	Debugf           func(format string, args ...any) // nil = no debug log
@@ -50,6 +56,7 @@ func Run(o Options) int {
 		sshPath:       o.SSHPath,
 		args:          o.SSHArgs,
 		reconnectArgs: o.ReconnectSSHArgs,
+		stderr:        o.SSHStderr,
 		term:          tty.Save(os.Stdin),
 	}
 	return runShell(cfg, r, o)
@@ -121,6 +128,7 @@ func runShell(cfg config, r runner, o Options) int {
 	// processed before any channel event, so nothing can observe a running
 	// state whose child does not exist.
 	var queue []event
+	childStarted := false
 	for {
 		var ev event
 		if len(queue) > 0 {
@@ -130,14 +138,34 @@ func runShell(cfg config, r runner, o Options) int {
 		}
 		var cmds []command
 		s, cmds = decide(s, ev)
+		if _, ok := ev.(childExited); ok && len(cmds) > 0 {
+			if finish, ok := cmds[0].(finishChildOutput); ok {
+				if err := r.finishOutput(finish.discardDisconnect); err != nil {
+					debugf("finish child output: %v", err)
+					return 1
+				}
+				if childStarted && o.Report != nil {
+					o.Report.ChildFinished()
+				}
+				childStarted = false
+				cmds = cmds[1:]
+			}
+		}
 		debugf("event %#v -> state %d, %d command(s)", ev, s.kind, len(cmds))
 		for _, c := range cmds {
 			switch c := c.(type) {
 			case spawnChild:
+				if o.Report != nil {
+					o.Report.PrepareChild()
+				}
 				if err := r.start(); err != nil {
 					debugf("spawn failed: %v", err)
 					queue = append(queue, childExited{code: 255})
 					continue
+				}
+				childStarted = true
+				if o.Report != nil {
+					o.Report.ChildStarted()
 				}
 				go func() {
 					childEvent := r.wait()
@@ -174,6 +202,8 @@ func doReport(rep Reporter, s statusKind) {
 		rep.LinkDown()
 	case statusReconnecting:
 		rep.Reconnecting()
+	case statusReconnectNow:
+		rep.ReconnectNow()
 	case statusReconnected:
 		rep.Reconnected()
 	case statusPersistentFailures:

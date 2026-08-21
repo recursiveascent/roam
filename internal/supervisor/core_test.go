@@ -79,7 +79,10 @@ func TestPathDownDebouncesThenKills(t *testing.T) {
 
 	// The kill lands; child exits; path still down -> waiting + status line.
 	s, cmds = decide(s, childExited{signaled: true, signum: 15})
-	if !reflect.DeepEqual(cmds, []command{report{statusLinkDown}}) {
+	if !reflect.DeepEqual(cmds, []command{
+		finishChildOutput{discardDisconnect: true},
+		report{statusLinkDown},
+	}) {
 		t.Fatalf("after killed child exits: cmds = %#v", cmds)
 	}
 	if s.kind != stateWaiting {
@@ -126,14 +129,16 @@ func TestPathUpFromWaitingSettlesThenRespawns(t *testing.T) {
 	)
 
 	s, cmds := decide(s, pathEvent{satisfied: true, fingerprint: "en1/1"})
-	want := []command{startTimer{id: 3, d: s.cfg.settle}}
+	want := []command{
+		report{statusReconnecting},
+		startTimer{id: 3, d: s.cfg.settle},
+	}
 	if !reflect.DeepEqual(cmds, want) {
 		t.Fatalf("on path up: cmds = %#v, want %#v", cmds, want)
 	}
 
 	s, cmds = decide(s, timerFired{id: 3})
 	want = []command{
-		report{statusReconnecting},
 		spawnChild{},
 		startTimer{id: 4, d: s.cfg.establish},
 	}
@@ -189,7 +194,8 @@ func TestPathChangeDebouncesThenKillsAndRespawns(t *testing.T) {
 	// The path is up, so the condemned child's exit respawns at once.
 	s, cmds = decide(s, childExited{signaled: true, signum: 15})
 	want = []command{
-		report{statusReconnecting},
+		finishChildOutput{discardDisconnect: true},
+		report{statusReconnectNow},
 		spawnChild{},
 		startTimer{id: 3, d: s.cfg.establish},
 	}
@@ -219,11 +225,67 @@ func TestPathChangeFlapBackCancels(t *testing.T) {
 	}
 }
 
+func TestEstablishedExit255DiscardsOutputBeforeImmediateRetry(t *testing.T) {
+	s := running(t, "en0/1")
+	s, _ = decide(s, timerFired{id: s.estTimer})
+	s, cmds := decide(s, childExited{code: 255})
+	want := []command{
+		finishChildOutput{discardDisconnect: true},
+		report{statusReconnectNow},
+		spawnChild{},
+		startTimer{id: 2, d: s.cfg.establish},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
+	}
+}
+
+func TestInitialExit255FlushesOutputBeforeImmediateRetry(t *testing.T) {
+	s := running(t, "en0/1")
+	s, cmds := decide(s, childExited{code: 255})
+	want := []command{
+		finishChildOutput{discardDisconnect: false},
+		report{statusReconnectNow},
+		spawnChild{},
+		startTimer{id: 2, d: s.cfg.establish},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
+	}
+}
+
+func TestReconnectFailureDiscardsOutputBeforeBackoffStatus(t *testing.T) {
+	s := running(t, "en0/1")
+	s, _ = decide(s, childExited{code: 255})
+	s, cmds := decide(s, childExited{code: 255})
+	want := []command{
+		finishChildOutput{discardDisconnect: true},
+		report{statusReconnecting},
+		startTimer{id: 3, d: time.Second},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
+	}
+}
+
+func TestCleanExitFlushesOutputBeforeExit(t *testing.T) {
+	s := running(t, "en0/1")
+	_, cmds := decide(s, childExited{code: 0})
+	want := []command{
+		finishChildOutput{discardDisconnect: false},
+		exitProgram{code: 0},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
+	}
+}
+
 func TestCleanExitPropagates(t *testing.T) {
 	s := running(t, "en0/1")
 	s, cmds := decide(s, childExited{code: 0})
-	if !reflect.DeepEqual(cmds, []command{exitProgram{code: 0}}) {
-		t.Fatalf("cmds = %#v, want exitProgram{0}", cmds)
+	want := []command{finishChildOutput{}, exitProgram{code: 0}}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
 	}
 	if s.kind != stateDone {
 		t.Fatalf("kind = %v, want stateDone", s.kind)
@@ -237,16 +299,18 @@ func TestCleanExitPropagates(t *testing.T) {
 func TestNonzeroNon255ExitPropagates(t *testing.T) {
 	s := running(t, "en0/1")
 	_, cmds := decide(s, childExited{code: 7})
-	if !reflect.DeepEqual(cmds, []command{exitProgram{code: 7}}) {
-		t.Fatalf("cmds = %#v, want exitProgram{7}", cmds)
+	want := []command{finishChildOutput{}, exitProgram{code: 7}}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
 	}
 }
 
 func TestForeignSignalDeathPropagates(t *testing.T) {
 	s := running(t, "en0/1")
 	_, cmds := decide(s, childExited{signaled: true, signum: 9})
-	if !reflect.DeepEqual(cmds, []command{exitProgram{code: 137}}) {
-		t.Fatalf("cmds = %#v, want exitProgram{137}", cmds)
+	want := []command{finishChildOutput{}, exitProgram{code: 137}}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
 	}
 }
 
@@ -254,7 +318,8 @@ func TestExit255PathUpRespawnsImmediatelyFirstTime(t *testing.T) {
 	s := running(t, "en0/1")
 	s, cmds := decide(s, childExited{code: 255})
 	want := []command{
-		report{statusReconnecting},
+		finishChildOutput{},
+		report{statusReconnectNow},
 		spawnChild{},
 		startTimer{id: 2, d: s.cfg.establish},
 	}
@@ -271,7 +336,11 @@ func TestConsecutiveFailuresBackOffExponentially(t *testing.T) {
 	s, _ = decide(s, childExited{code: 255})
 
 	s, cmds := decide(s, childExited{code: 255})
-	want := []command{startTimer{id: 3, d: time.Second}}
+	want := []command{
+		finishChildOutput{discardDisconnect: true},
+		report{statusReconnecting},
+		startTimer{id: 3, d: time.Second},
+	}
 	if !reflect.DeepEqual(cmds, want) {
 		t.Fatalf("second failure: cmds = %#v, want %#v", cmds, want)
 	}
@@ -284,7 +353,11 @@ func TestConsecutiveFailuresBackOffExponentially(t *testing.T) {
 
 	s, _ = decide(s, timerFired{id: 3})
 	s, cmds = decide(s, childExited{code: 255})
-	want = []command{report{statusPersistentFailures}, startTimer{id: 5, d: 2 * time.Second}}
+	want = []command{
+		finishChildOutput{discardDisconnect: true},
+		report{statusPersistentFailures},
+		startTimer{id: 5, d: 2 * time.Second},
+	}
 	if !reflect.DeepEqual(cmds, want) {
 		t.Fatalf("third failure: cmds = %#v, want %#v", cmds, want)
 	}
@@ -306,8 +379,13 @@ func TestInitialBackoffRespectsSmallCap(t *testing.T) {
 	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: "en0/1"})
 	s, _ = decide(s, childExited{code: 255})
 	_, cmds := decide(s, childExited{code: 255})
-	if !reflect.DeepEqual(cmds, []command{startTimer{id: 3, d: 100 * time.Millisecond}}) {
-		t.Fatalf("cmds = %#v, want capped retry timer", cmds)
+	want := []command{
+		finishChildOutput{discardDisconnect: true},
+		report{statusReconnecting},
+		startTimer{id: 3, d: 100 * time.Millisecond},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
 	}
 }
 
@@ -363,8 +441,9 @@ func TestExit255PathDownWaits(t *testing.T) {
 	s := running(t, "en0/1")
 	s, _ = decide(s, pathEvent{satisfied: false, fingerprint: "none"})
 	s, cmds := decide(s, childExited{code: 255})
-	if !reflect.DeepEqual(cmds, []command{report{statusLinkDown}}) {
-		t.Fatalf("cmds = %#v, want linkDown report", cmds)
+	want := []command{finishChildOutput{}, report{statusLinkDown}}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
 	}
 	if s.kind != stateWaiting {
 		t.Fatalf("kind = %v, want stateWaiting", s.kind)
@@ -423,7 +502,7 @@ func TestEstablishTimerFiresAfterKillIsDropped(t *testing.T) {
 	// for a session we just killed.
 	s := running(t, "en0/1")
 	s, _ = decide(s, timerFired{id: s.estTimer}) // established
-	s, _ = decide(s, childExited{code: 255})    // respawn; backoffDelay=1s
+	s, _ = decide(s, childExited{code: 255})     // respawn; backoffDelay=1s
 	s, _ = decide(s, pathEvent{satisfied: true, fingerprint: "en1/1"})
 	est := s.estTimer
 	s, _ = decide(s, timerFired{id: s.pendTimer}) // kill dispatched
@@ -451,8 +530,9 @@ func TestCleanExitDuringKillWindowPropagates(t *testing.T) {
 	s, _ = decide(s, timerFired{id: 2})                                // killChild dispatched
 	// the child beat the SIGTERM to a clean self-exit (user typed exit)
 	_, cmds := decide(s, childExited{code: 0})
-	if !reflect.DeepEqual(cmds, []command{exitProgram{code: 0}}) {
-		t.Fatalf("cmds = %#v, want exitProgram{0}", cmds)
+	want := []command{finishChildOutput{}, exitProgram{code: 0}}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("cmds = %#v, want %#v", cmds, want)
 	}
 }
 
@@ -507,8 +587,9 @@ func TestTerminateWhileRunningKillsThenExits(t *testing.T) {
 		t.Fatalf("on signal: cmds = %#v, want killChild", cmds)
 	}
 	_, cmds = decide(s, childExited{signaled: true, signum: 15})
-	if !reflect.DeepEqual(cmds, []command{exitProgram{code: 143}}) {
-		t.Fatalf("after kill: cmds = %#v, want exitProgram{143}", cmds)
+	want := []command{finishChildOutput{}, exitProgram{code: 143}}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("after kill: cmds = %#v, want %#v", cmds, want)
 	}
 }
 

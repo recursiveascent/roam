@@ -57,6 +57,7 @@ type command interface{ isCommand() }
 
 type spawnChild struct{}
 type killChild struct{}
+type finishChildOutput struct{ discardDisconnect bool }
 type startTimer struct {
 	id int
 	d  time.Duration
@@ -64,17 +65,19 @@ type startTimer struct {
 type report struct{ s statusKind }
 type exitProgram struct{ code int }
 
-func (spawnChild) isCommand()  {}
-func (killChild) isCommand()   {}
-func (startTimer) isCommand()  {}
-func (report) isCommand()      {}
-func (exitProgram) isCommand() {}
+func (spawnChild) isCommand()        {}
+func (killChild) isCommand()         {}
+func (finishChildOutput) isCommand() {}
+func (startTimer) isCommand()        {}
+func (report) isCommand()            {}
+func (exitProgram) isCommand()       {}
 
 type statusKind int
 
 const (
 	statusLinkDown statusKind = iota
 	statusReconnecting
+	statusReconnectNow
 	statusReconnected
 	statusPersistentFailures
 )
@@ -140,9 +143,6 @@ func (s *state) clearPending() {
 // established timer. reconnect marks respawns that follow an abnormal exit.
 func spawn(s *state, reconnect bool) []command {
 	var cmds []command
-	if reconnect {
-		cmds = append(cmds, report{statusReconnecting})
-	}
 	cmds = append(cmds, spawnChild{})
 	s.estTimer = s.newTimer()
 	cmds = append(cmds, startTimer{id: s.estTimer, d: s.cfg.establish})
@@ -227,7 +227,10 @@ func decidePath(s state, e pathEvent) (state, []command) {
 		if s.pending != pendingSettle {
 			s.pending = pendingSettle
 			s.pendTimer = s.newTimer()
-			return s, []command{startTimer{id: s.pendTimer, d: s.cfg.settle}}
+			return s, []command{
+				report{statusReconnecting},
+				startTimer{id: s.pendTimer, d: s.cfg.settle},
+			}
 		}
 		return s, nil
 
@@ -305,53 +308,76 @@ func decideExit(s state, e childExited) (state, []command) {
 	if s.killSent {
 		if s.quitOnExit {
 			s.kind = stateDone
-			return s, []command{exitProgram{code: s.quitCode}}
+			return s, []command{
+				finishChildOutput{},
+				exitProgram{code: s.quitCode},
+			}
 		}
 		if !e.signaled && e.code != 255 {
 			// The child beat the kill to a clean exit of its own (zmx
 			// detach, `exit`): user intent, not link death. Our kills
 			// always end in a signal death or ssh's 255.
 			s.kind = stateDone
-			return s, []command{exitProgram{code: e.code}}
+			return s, []command{
+				finishChildOutput{},
+				exitProgram{code: e.code},
+			}
 		}
+		finish := finishChildOutput{discardDisconnect: true}
 		if s.pathUp {
-			return s, spawn(&s, true)
+			cmds := []command{finish, report{statusReconnectNow}}
+			return s, append(cmds, spawn(&s, true)...)
 		}
-		return s, toWaiting(&s)
+		return s, append([]command{finish}, toWaiting(&s)...)
 	}
 
 	// The child exited on its own.
 	if e.signaled {
 		s.kind = stateDone
-		return s, []command{exitProgram{code: 128 + e.signum}}
+		return s, []command{
+			finishChildOutput{},
+			exitProgram{code: 128 + e.signum},
+		}
 	}
 	if e.code != 255 {
 		// zmx detach, remote exit, or a finished command: user intent.
 		s.kind = stateDone
-		return s, []command{exitProgram{code: e.code}}
+		return s, []command{
+			finishChildOutput{},
+			exitProgram{code: e.code},
+		}
 	}
 
-	// Exit 255: a connection error under the exit-255 policy.
-	var cmds []command
+	// Exit 255: a connection error under the exit-255 policy. Initial
+	// pre-establishment failures keep their diagnostic; established sessions
+	// and reconnect attempts replace it with roam status.
+	finish := finishChildOutput{discardDisconnect: wasEstablished || s.reconnectRun}
 	if wasEstablished {
 		s.rapidFailures = 0
 	} else {
 		s.rapidFailures++
-		if s.rapidFailures == 3 {
-			cmds = append(cmds, report{statusPersistentFailures})
-		}
 	}
 	if !s.pathUp {
-		return s, append(cmds, toWaiting(&s)...)
+		return s, append([]command{finish}, toWaiting(&s)...)
 	}
 	if s.backoffDelay == 0 {
 		s.backoffDelay = minDuration(time.Second, s.cfg.maxBackoff)
+		cmds := []command{finish, report{statusReconnectNow}}
 		return s, append(cmds, spawn(&s, true)...)
 	}
+
 	s.kind = stateBackoff
 	s.pending = pendingRetry
 	s.pendTimer = s.newTimer()
-	cmds = append(cmds, startTimer{id: s.pendTimer, d: s.backoffDelay})
+	status := statusReconnecting
+	if s.rapidFailures >= 3 {
+		status = statusPersistentFailures
+	}
+	cmds := []command{
+		finish,
+		report{status},
+		startTimer{id: s.pendTimer, d: s.backoffDelay},
+	}
 	s.backoffDelay = minDuration(2*s.backoffDelay, s.cfg.maxBackoff)
 	return s, cmds
 }

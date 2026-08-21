@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -17,6 +19,7 @@ const killEscalation = 2 * time.Second
 type runner interface {
 	start() error
 	wait() childExited
+	finishOutput(discardDisconnect bool) error
 	kill()
 }
 
@@ -26,6 +29,9 @@ type procRunner struct {
 	sshPath       string
 	args          []string
 	reconnectArgs []string
+	stderr        io.Writer
+	filter        *sshStderr
+	waitErr       error
 	term          tty.State
 	escalation    time.Duration // 0 = killEscalation
 	started       bool
@@ -43,7 +49,12 @@ func (r *procRunner) start() error {
 	c := exec.CommandContext(ctx, r.sshPath, args...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
+	if r.stderr == nil {
+		c.Stderr = os.Stderr
+	} else {
+		r.filter = newSSHStderr(r.stderr)
+		c.Stderr = r.filter
+	}
 	// On cancel, send SIGTERM. If the child remains alive after WaitDelay,
 	// exec.Cmd sends SIGKILL.
 	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
@@ -64,7 +75,11 @@ func (r *procRunner) wait() childExited {
 		// Defensive: no child was started; report a connection error.
 		return childExited{code: 255}
 	}
-	_ = r.cmd.Wait()
+	err := r.cmd.Wait()
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, context.Canceled) {
+		r.waitErr = err
+	}
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -75,6 +90,17 @@ func (r *procRunner) wait() childExited {
 		return childExited{signaled: true, signum: int(ws.Signal())}
 	}
 	return childExited{code: ps.ExitCode()}
+}
+
+func (r *procRunner) finishOutput(discardDisconnect bool) error {
+	var outputErr error
+	if r.filter != nil {
+		outputErr = r.filter.finish(discardDisconnect)
+	}
+	err := errors.Join(outputErr, r.waitErr)
+	r.filter = nil
+	r.waitErr = nil
+	return err
 }
 
 func (r *procRunner) kill() {

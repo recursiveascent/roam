@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // ANSI SGR codes for the transient status color. Respected only when the
@@ -15,15 +16,18 @@ const (
 	ansiReset = "\x1b[0m"
 )
 
-// Printer renders transient status in place: each transient line overwrites
-// the previous one on the same row, and a successful reconnect clears it
-// entirely. It stays silent when the writer is not a terminal or when quiet
-// is set, so non-interactive use produces no incidental noise.
+// Printer renders transient status in place while no ssh child owns the
+// terminal. Child stderr and verbose logs share the same lock so roam never
+// clears a row after handing the terminal back to ssh.
 type Printer struct {
-	w       io.Writer
-	enabled bool
-	verbose bool
-	color   bool
+	mu         sync.Mutex
+	w          io.Writer
+	enabled    bool
+	verbose    bool
+	color      bool
+	transient  string
+	child      bool
+	afterChild bool
 }
 
 // New constructs a Printer. color is gated by NO_COLOR here, so callers can
@@ -37,39 +41,114 @@ func New(w io.Writer, isTTY, quiet, verbose bool) *Printer {
 	}
 }
 
-func (p *Printer) LinkDown()     { p.transient("link down — waiting for network") }
-func (p *Printer) Reconnecting() { p.transient("reconnecting…") }
+func (p *Printer) LinkDown()     { p.showTransient("link down — waiting for network") }
+func (p *Printer) Reconnecting() { p.showTransient("reconnecting…") }
+func (p *Printer) ReconnectNow() { p.durable("reconnecting…") }
 
 func (p *Printer) Reconnected() {
-	p.clear()
 	if p.verbose {
-		p.transient("reconnected")
+		p.durable("reconnected")
 	}
 }
 
 func (p *Printer) PersistentFailures() {
-	p.transient("persistent failures — check args; ^C to quit")
+	p.showTransient("persistent failures — check args; ^C to quit")
 }
 
-// transient writes "[roam: <text>]" on the current row, overwriting whatever
-// was there. \r returns to column 0 and \x1b[K erases to end of line so a
-// shorter message leaves no stale glyphs. No trailing newline: the row
-// stays open and is reclaimed by the next transient or by clear().
-func (p *Printer) transient(text string) {
+// PrepareChild relinquishes roam's transient row before the child can write
+// directly to stdout.
+func (p *Printer) PrepareChild() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.enabled && p.transient != "" {
+		p.clearLocked()
+	}
+	p.transient = ""
+	p.afterChild = false
+}
+
+func (p *Printer) ChildStarted() {
+	p.mu.Lock()
+	p.child = true
+	p.afterChild = false
+	p.mu.Unlock()
+}
+
+func (p *Printer) ChildFinished() {
+	p.mu.Lock()
+	p.child = false
+	p.afterChild = true
+	p.mu.Unlock()
+}
+
+// Write forwards child stderr without changing terminal-row ownership.
+func (p *Printer) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.w.Write(b)
+}
+
+// Debugf writes a durable verbose record. If a childless transient is active,
+// it is redrawn after the log entry.
+func (p *Printer) Debugf(format string, args ...any) {
+	if !p.verbose {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	transient := p.transient
+	if transient != "" {
+		p.clearLocked()
+		p.transient = ""
+	}
+	if p.child || p.afterChild {
+		_, _ = io.WriteString(p.w, "\r\n")
+		p.afterChild = false
+	}
+	_, _ = fmt.Fprintf(p.w, "[roam: "+format+"]\r\n", args...)
+	if transient != "" && !p.child {
+		p.renderTransientLocked(transient)
+	}
+}
+
+// showTransient writes on roam's current row. After a child exits, it first
+// establishes a fresh row because direct stdout may have left the cursor
+// anywhere.
+func (p *Printer) showTransient(text string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.enabled || p.child {
+		return
+	}
+	if p.afterChild {
+		_, _ = io.WriteString(p.w, "\r\n")
+		p.afterChild = false
+	}
+	p.renderTransientLocked(text)
+}
+
+func (p *Printer) renderTransientLocked(text string) {
+	_, _ = fmt.Fprintf(p.w, "\r\x1b[K%s[roam: %s]%s", p.dim(), text, p.reset())
+	p.transient = text
+}
+
+func (p *Printer) durable(text string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if !p.enabled {
 		return
 	}
-	fmt.Fprintf(p.w, "\r\x1b[K%s[roam: %s]%s", p.dim(), text, p.reset())
+	if p.transient != "" {
+		p.clearLocked()
+	}
+	_, _ = fmt.Fprintf(p.w, "\r\n\r\x1b[K%s[roam: %s]%s\r\n", p.dim(), text, p.reset())
+	p.transient = ""
+	p.afterChild = false
 }
 
-// clear erases the current transient row. It runs unconditionally (when
-// enabled) on a successful reconnect so the restored session repaints a
-// blank row rather than a stale status message.
-func (p *Printer) clear() {
-	if !p.enabled {
-		return
-	}
-	io.WriteString(p.w, "\r\x1b[K")
+func (p *Printer) clearLocked() {
+	_, _ = io.WriteString(p.w, "\r\x1b[K")
 }
 
 func (p *Printer) dim() string {

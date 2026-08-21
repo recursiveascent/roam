@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"os"
+	"reflect"
 	"sync"
 	"syscall"
 	"testing"
@@ -32,7 +33,16 @@ func (r *scriptRunner) start() error {
 }
 
 func (r *scriptRunner) wait() childExited { return r.cmd.wait() }
-func (r *scriptRunner) kill()             { r.cmd.kill() }
+func (r *scriptRunner) finishOutput(discard bool) error {
+	r.mu.Lock()
+	cmd := r.cmd
+	r.mu.Unlock()
+	if cmd == nil {
+		return nil
+	}
+	return cmd.finishOutput(discard)
+}
+func (r *scriptRunner) kill() { r.cmd.kill() }
 
 // recordingReporter records which status lines were requested.
 type recordingReporter struct {
@@ -47,8 +57,12 @@ func (r *recordingReporter) add(s string) {
 }
 func (r *recordingReporter) LinkDown()           { r.add("down") }
 func (r *recordingReporter) Reconnecting()       { r.add("reconnecting") }
+func (r *recordingReporter) ReconnectNow()       { r.add("reconnect-now") }
 func (r *recordingReporter) Reconnected()        { r.add("reconnected") }
 func (r *recordingReporter) PersistentFailures() { r.add("persistent") }
+func (r *recordingReporter) PrepareChild()       {}
+func (r *recordingReporter) ChildStarted()       {}
+func (r *recordingReporter) ChildFinished()      {}
 
 func testShellConfig() config {
 	return config{
@@ -73,6 +87,100 @@ func TestShellPropagatesCleanExit(t *testing.T) {
 	}
 }
 
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(event string) {
+	l.mu.Lock()
+	l.events = append(l.events, event)
+	l.mu.Unlock()
+}
+
+func (l *eventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
+type orderingRunner struct {
+	log   *eventLog
+	exits []childExited
+	i     int
+}
+
+func (r *orderingRunner) start() error {
+	r.log.add("start")
+	return nil
+}
+
+func (r *orderingRunner) wait() childExited {
+	r.log.add("wait")
+	exit := r.exits[r.i]
+	r.i++
+	return exit
+}
+
+func (r *orderingRunner) finishOutput(discard bool) error {
+	if discard {
+		r.log.add("finish-discard")
+	} else {
+		r.log.add("finish-flush")
+	}
+	return nil
+}
+
+func (r *orderingRunner) kill() { r.log.add("kill") }
+
+type orderingReporter struct{ log *eventLog }
+
+func (r *orderingReporter) LinkDown()           { r.log.add("down") }
+func (r *orderingReporter) Reconnecting()       { r.log.add("reconnecting") }
+func (r *orderingReporter) ReconnectNow()       { r.log.add("reconnect-now") }
+func (r *orderingReporter) Reconnected()        { r.log.add("reconnected") }
+func (r *orderingReporter) PersistentFailures() { r.log.add("persistent") }
+func (r *orderingReporter) PrepareChild()       { r.log.add("prepare") }
+func (r *orderingReporter) ChildStarted()       { r.log.add("child-started") }
+func (r *orderingReporter) ChildFinished()      { r.log.add("child-finished") }
+
+func TestShellOrdersChildOutputAndTerminalOwnership(t *testing.T) {
+	paths := make(chan PathEvent, 1)
+	paths <- PathEvent{Satisfied: true, Fingerprint: "en0/1"}
+	log := &eventLog{}
+	r := &orderingRunner{
+		log: log,
+		exits: []childExited{
+			{code: 255},
+			{code: 3},
+		},
+	}
+	rep := &orderingReporter{log: log}
+
+	code := runShell(testShellConfig(), r, Options{
+		PathEvents: paths,
+		Signals:    make(chan os.Signal),
+		Report:     rep,
+		Debugf: func(_ string, args ...any) {
+			if _, ok := args[0].(childExited); ok {
+				log.add("debug-exit")
+			}
+		},
+	})
+	if code != 3 {
+		t.Fatalf("runShell = %d, want 3", code)
+	}
+	want := []string{
+		"prepare", "start", "child-started", "wait",
+		"finish-flush", "child-finished", "debug-exit", "reconnect-now",
+		"prepare", "start", "child-started", "wait",
+		"finish-flush", "child-finished", "debug-exit",
+	}
+	if got := log.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
 func TestShellReconnectsAfter255(t *testing.T) {
 	paths := make(chan PathEvent, 1)
 	paths <- PathEvent{Satisfied: true, Fingerprint: "en0/1"}
@@ -89,8 +197,8 @@ func TestShellReconnectsAfter255(t *testing.T) {
 	}
 	rep.mu.Lock()
 	defer rep.mu.Unlock()
-	if len(rep.lines) == 0 || rep.lines[0] != "reconnecting" {
-		t.Fatalf("reporter lines = %v, want leading \"reconnecting\"", rep.lines)
+	if len(rep.lines) == 0 || rep.lines[0] != "reconnect-now" {
+		t.Fatalf("reporter lines = %v, want leading %q", rep.lines, "reconnect-now")
 	}
 }
 
@@ -107,8 +215,9 @@ func (r *memRunner) start() error {
 	}
 	return nil
 }
-func (r *memRunner) wait() childExited { return <-r.exits }
-func (r *memRunner) kill()             {}
+func (r *memRunner) wait() childExited       { return <-r.exits }
+func (r *memRunner) finishOutput(bool) error { return nil }
+func (r *memRunner) kill()                   {}
 
 func TestShellSpawnFailureWithPendingSignalDoesNotRace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
