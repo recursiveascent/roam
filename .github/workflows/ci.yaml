@@ -25,3 +25,5 @@ jobs:
       - run: nix build
       - run: make check
         shell: 'nix develop -c bash -e {0}'
+      - run: make release-check
+        shell: 'nix develop -c bash -e {0}'

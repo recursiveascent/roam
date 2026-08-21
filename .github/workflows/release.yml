@@ -23,7 +23,7 @@ jobs:
       - name: Verify tag matches VERSION
         run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
       - name: Publish GitHub release
-        run: env -u NIX_CFLAGS_COMPILE -u NIX_LDFLAGS -u SDKROOT -u DEVELOPER_DIR goreleaser release --clean
+        run: ./scripts/goreleaser.sh release --clean
         shell: 'nix develop -c bash -e {0}'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,4 +1,4 @@
-.PHONY: build clean test check release help
+.PHONY: build clean test check release-check release-verify release help
 
 BIN := build/roam
 
@@ -16,10 +16,16 @@ check: test ## Run all checks
 	go fix -diff ./...
 	$(MAKE) -C ./internal/netmon/testdata
 
+release-check: ## Build and validate a snapshot release
+	./scripts/release-check.sh
+
+release-verify: ## Verify the published release and Homebrew formula
+	./scripts/release-verify.sh
+
 release: ## Publish a GitHub release
-	env -u NIX_CFLAGS_COMPILE -u NIX_LDFLAGS -u SDKROOT -u DEVELOPER_DIR goreleaser release --clean
+	./scripts/goreleaser.sh release --clean
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := help

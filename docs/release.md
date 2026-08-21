@@ -1,46 +1,90 @@
 # Release process
 
-Releases are cut by tagging a commit on `main`. GoReleaser builds the
-artifacts and publishes the GitHub release; the release workflow then updates
-the Homebrew tap formula automatically.
+Releases are cut by tagging a commit on `main`. GoReleaser publishes the
+GitHub release; the release workflow then updates the Homebrew tap formula.
 
 ## Prerequisites
 
-- GoReleaser is provided by `flake.nix`; run commands through `nix develop`.
+- Run release commands through the Nix development shell. `flake.nix` provides
+  Go and GoReleaser.
 - The `recursiveascent/roam` Actions secret `CACHIX_AUTH_TOKEN` must contain a
-  Cachix auth token that can push to the `recursiveascent` cache:
+  token that can push to the `recursiveascent` Cachix cache:
 
   ```
   gh secret set CACHIX_AUTH_TOKEN -R recursiveascent/roam
   ```
 
-- A fine-grained PAT with **contents: write** on
-  `recursiveascent/homebrew-tap` must exist as the repo secret `TAP_TOKEN`:
+- The Actions secret `TAP_TOKEN` must contain a fine-grained PAT with
+  **Contents: write** access to `recursiveascent/homebrew-tap`. Fine-grained
+  PATs are created in GitHub's web UI, not with `gh`; store it afterward:
 
   ```
   gh secret set TAP_TOKEN -R recursiveascent/roam
   ```
 
-  The default `GITHUB_TOKEN` is scoped to the roam repository and cannot
-  update the tap.
+- The local `gh` token needs the `workflow` scope to push commits that change
+  workflow files:
 
-## Steps
+  ```
+  gh auth refresh -h github.com -s workflow
+  ```
 
-1. **Edit `CHANGELOG.md`** — add a `## <version>` section above the last
-   release. Keep entries user-facing and concrete.
+## Preflight
 
-2. **Bump `VERSION`** — the file contains the bare version (`0.1.0`, no `v`
-   prefix). The release workflow verifies that `v$(cat VERSION)` equals the
-   tag name.
+Check authentication and required secrets:
 
-3. **Validate the release config and build locally:**
+```
+gh auth status -h github.com
+gh secret list -R recursiveascent/roam
+```
+
+The secret list must contain `CACHIX_AUTH_TOKEN` and `TAP_TOKEN`.
+
+Fetch before preparing the release so remote movement and authentication
+failures are found early:
+
+```
+jj git fetch --remote origin
+```
+
+If an SSH remote fails because no key is available, switch this checkout to
+GitHub CLI's HTTPS credentials:
+
+```
+jj git remote set-url origin https://github.com/recursiveascent/roam.git
+jj git fetch --remote origin
+```
+
+Confirm that the working revision contains only the intended release changes:
+
+```
+jj st
+jj log -n 4
+```
+
+Release preparation can happen in an isolated jj workspace. Publishing cannot:
+`scripts/goreleaser.sh` refuses a non-snapshot release from a secondary jj
+workspace because its shared Git HEAD points at the primary checkout.
+
+## Prepare and validate
+
+1. Add a user-facing section to `CHANGELOG.md`.
+
+2. Set `VERSION` to the bare semantic version, for example `0.2.0` rather than
+   `v0.2.0`.
+
+3. Run the complete local release gate:
 
    ```
-   nix develop -c goreleaser check
-   nix develop -c env -u NIX_CFLAGS_COMPILE -u NIX_LDFLAGS -u SDKROOT -u DEVELOPER_DIR goreleaser release --clean --snapshot
+   nix develop -c make release-check
    ```
 
-4. **Run checks:**
+   `release-check` validates the GoReleaser configuration, builds a clean
+   snapshot, verifies checksums and archive contents, checks both Mach-O
+   architectures, runs the host binary, and rejects dynamic-library references
+   into `/nix/store`.
+
+4. Run the normal project checks:
 
    ```
    nix develop -c make check
@@ -48,39 +92,93 @@ the Homebrew tap formula automatically.
    nix build
    ```
 
-5. **Describe the release revision** with a `Prepare <version> release`
-   message. Keep the VERSION bump and release configuration atomic so the tag
-   points at a revision whose VERSION matches.
-
-6. **Move `main` to the release revision and push:**
+5. Describe the release revision atomically:
 
    ```
-   jj bookmark set main -r @
-   jj git push --remote origin --bookmark main
+   jj desc -m "Prepare $(cat VERSION) release"
    ```
 
-7. **Tag `main` and push the tag:**
+The tag must point at the revision containing the matching `VERSION`.
 
-   ```
-   jj tag set v<version> -r main
-   jj git push --remote origin --tag v<version>
-   ```
+## Publish
 
-Pushing a `v*` tag triggers the Release workflow.
+From the primary checkout, move and push `main`:
 
-## What the workflow does
+```
+jj bookmark set main -r @
+jj git push --remote origin --bookmark main
+```
 
-`.github/workflows/release.yml` runs on a pushed `v*` tag:
+Create the tag locally, then inspect both references before pushing it:
 
-1. Verifies the tag matches `VERSION`.
-2. Runs GoReleaser on macOS to publish amd64 and arm64 Darwin archives, a
-   source archive, and `checksums.txt`.
-3. Renders `Formula/roam.rb` as a macOS-only source-build formula and commits
-   it to `recursiveascent/homebrew-tap` through the Contents API.
+```
+version=$(cat VERSION)
+jj tag set "v$version" -r main
+jj show main
+jj tag list
+jj git push --remote origin --tag "v$version"
+```
 
-The Homebrew formula builds from source with Go. GoReleaser's Homebrew
-integrations are not used; the explicit formula keeps the tap update visible
-and matches litefind's release process.
+Pushing a `v*` tag triggers `.github/workflows/release.yml`.
+
+## Monitor GitHub Actions
+
+List the runs created by the main and tag pushes:
+
+```
+gh run list -R recursiveascent/roam --limit 5
+```
+
+Attach to each CI and Release run and propagate failure through the command's
+exit status:
+
+```
+gh run watch <run-id> -R recursiveascent/roam --exit-status
+```
+
+The Release workflow:
+
+1. Verifies that the tag equals `v$(cat VERSION)`.
+2. Builds amd64 and arm64 Darwin archives, a source archive, and
+   `checksums.txt`.
+3. Publishes the GitHub release.
+4. Renders and commits `Formula/roam.rb` to
+   `recursiveascent/homebrew-tap` through the Contents API.
+
+## Verify the published release
+
+After both workflows pass, run:
+
+```
+make release-verify
+```
+
+`release-verify`:
+
+- Confirms the release is published rather than draft or prerelease.
+- Downloads every asset and verifies `checksums.txt`.
+- Repeats archive, architecture, version, and linkage checks against the
+  published binaries.
+- Downloads and syntax-checks the Homebrew formula.
+- Refreshes only the jj-backed `recursiveascent/tap` checkout.
+- Installs or reinstalls the formula and runs `brew test`.
+- Invokes `$(brew --prefix)/bin/roam` directly so another `roam` earlier on
+  `PATH` cannot hide the Homebrew binary.
+
+The script always sets `HOMEBREW_NO_AUTO_UPDATE=1`. Release verification must
+never run the global `brew update`; only the project tap is fetched.
+
+## Release scripts
+
+- `scripts/goreleaser.sh` removes `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`,
+  `SDKROOT`, and `DEVELOPER_DIR` before invoking GoReleaser. A normal Nix
+  package should link against its Nix closure, but standalone release binaries
+  must link only against system macOS libraries.
+- `scripts/check-release-artifacts.sh` contains the checks shared by local
+  snapshots and published releases.
+- `scripts/release-check.sh` is the pre-tag local gate and CI release-package
+  check.
+- `scripts/release-verify.sh` is the post-tag GitHub and Homebrew check.
 
 ## Version resolution
 
@@ -91,21 +189,54 @@ and matches litefind's release process.
    `go install github.com/recursiveascent/roam@v<version>`.
 3. The embedded `VERSION` file.
 
-## Verifying a release
+## Troubleshooting
 
-After the workflow completes:
+### Release binary references `/nix/store`
 
-- The GitHub release should list two Darwin archives, the source archive, and
-  `checksums.txt`.
-- Inspect the tap formula:
+Run `nix develop -c make release-check`. Always invoke GoReleaser through
+`scripts/goreleaser.sh`; direct execution inside `nix develop` leaks
+architecture-specific Nix compiler and SDK paths into CGO binaries.
 
-  ```
-  gh api repos/recursiveascent/homebrew-tap/contents/Formula/roam.rb --jq .content | base64 -d
-  ```
+### GoReleaser says the jj workspace is not a Git repository
 
-- Install and verify:
+Use `scripts/goreleaser.sh`. It supplies the shared Git directory and current
+workspace tree for `check` and snapshot releases. Publishing remains restricted
+to the primary checkout.
 
-  ```
-  brew reinstall recursiveascent/tap/roam
-  roam --version
-  ```
+### Fetch or push fails with `Permission denied (publickey)`
+
+Switch `origin` to HTTPS as shown in Preflight. Do not wait until after moving
+`main` to discover the authentication failure.
+
+### The tap formula exists on GitHub but Homebrew cannot find it
+
+The local tap's remote bookmark may be current while its jj working copy is
+stale. Run `make release-verify`; it fetches the tap and rebases its empty
+working-copy revision onto `main@origin`. It aborts rather than disturb local tap
+changes.
+
+### Homebrew tries to update unrelated repositories
+
+Ensure `HOMEBREW_NO_AUTO_UPDATE=1` is exported. The release verification script
+sets it itself. Do not use `brew update` to refresh this tap.
+
+### The tag workflow fails before publishing
+
+Compare the exact tag with `VERSION`:
+
+```
+jj tag list
+cat VERSION
+```
+
+The required relationship is `tag == v$(cat VERSION)` and both `main` and the
+tag must point at the same revision.
+
+### The installed command is not the Homebrew build
+
+Check for PATH shadowing and invoke the formula directly:
+
+```
+command -v roam
+"$(brew --prefix)/bin/roam" --version
+```
